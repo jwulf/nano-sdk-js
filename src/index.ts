@@ -10,6 +10,7 @@ import {
 } from "@camunda8/orchestration-cluster-api";
 import { detectNano, normalizeBase, type NanoInfo } from "./detect.js";
 import { CommandStreamTransport } from "./transport.js";
+import { EmbeddedTransport, type EmbeddedHost } from "./embedded.js";
 import { NanoJobWorker } from "./nanoWorker.js";
 
 // Re-export everything else so consumers can swap the import path and nothing
@@ -17,13 +18,16 @@ import { NanoJobWorker } from "./nanoWorker.js";
 export * from "@camunda8/orchestration-cluster-api";
 export { detectNano, type NanoInfo } from "./detect.js";
 export { CommandStreamTransport } from "./transport.js";
+export { EmbeddedTransport, type EmbeddedHost, type EmbeddedJob } from "./embedded.js";
 export { NanoJobWorker } from "./nanoWorker.js";
 
-/** auto: upgrade only on Nano. command-stream: force. rest: never upgrade. */
-export type NanoTransport = "auto" | "command-stream" | "rest";
+/** auto: upgrade only on Nano. command-stream: force. rest: never upgrade. embedded: in-process μ-nano. */
+export type NanoTransport = "auto" | "command-stream" | "rest" | "embedded";
 
 type AnyOpts = Parameters<typeof createCamundaClientBase>[0] & {
   config?: Record<string, unknown> & { CAMUNDA_TRANSPORT?: NanoTransport; CAMUNDA_REST_ADDRESS?: string };
+  /** Embedded (ADR 0005) in-process engine host; required when transport is "embedded". */
+  embeddedHost?: EmbeddedHost;
 };
 
 function resolveMode(opts?: AnyOpts): NanoTransport {
@@ -48,6 +52,14 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
   const mode = resolveMode(opts);
   if (mode === "rest") return client;
 
+  // Embedded (ADR 0005): bind the in-process μ-nano host directly — no detection,
+  // no socket. The host is the loopback "Nano gateway in the same process".
+  if (mode === "embedded") {
+    if (!opts?.embeddedHost) throw new Error("transport 'embedded' requires opts.embeddedHost");
+    const transport = new EmbeddedTransport(opts.embeddedHost);
+    return wrapClient(client, async () => transport as any, () => transport.close());
+  }
+
   const restAddress = client.getConfig().restAddress;
   const base = baseFrom(restAddress);
 
@@ -64,15 +76,23 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
     if (!transport) transport = new CommandStreamTransport(base, nano.commandStreamPath);
     return transport;
   };
+  return wrapClient(client, ensure, () => transport?.close());
+}
 
+/** Wrap an upstream client, upgrading createProcessInstance + createJobWorker to
+ *  a Nano transport (command-stream or embedded) when `ensure` yields one. */
+function wrapClient(
+  client: ReturnType<typeof createCamundaClientBase>,
+  ensure: () => Promise<{ createInstance: Function; subscribe: Function; close: Function } | null>,
+  onStop?: () => void,
+): ReturnType<typeof createCamundaClientBase> {
   return new Proxy(client, {
     get(target, prop, receiver) {
       if (prop === "createProcessInstance") {
         return (input: any, options?: any) => {
-          const useStream = ensure();
-          return useStream.then(async (t) => {
+          return ensure().then(async (t) => {
             if (!t) return (target as any).createProcessInstance(input, options);
-            const r = await t.createInstance({
+            const r = await (t as any).createInstance({
               processDefinitionId: input?.processDefinitionId,
               processDefinitionKey: input?.processDefinitionKey,
               variables: input?.variables,
@@ -89,17 +109,14 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
         return (cfg: any) => {
           const w = new NanoJobWorker(null as any, { ...cfg, autoStart: false });
           void ensure().then((t) => {
-            if (t) { w.bindTransport(t); void w.start(); }
+            if (t) { w.bindTransport(t as any); void w.start(); }
             else (target as any).createJobWorker(cfg);
           });
           return w as any;
         };
       }
       if (prop === "stopAllWorkers") {
-        return () => {
-          transport?.close();
-          return (target as any).stopAllWorkers();
-        };
+        return () => { onStop?.(); return (target as any).stopAllWorkers(); };
       }
       return Reflect.get(target, prop, receiver);
     },
