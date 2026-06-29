@@ -1,11 +1,16 @@
 {
   "name": "@nanobpm/nano-sdk",
-  "version": "0.0.0-development",
+  "version": "1.0.0",
   "description": "Drop-in replacement for @camunda8/orchestration-cluster-api that upgrades to the Nano command-stream protocol when connected to a Nano server.",
   "license": "Apache-2.0",
   "type": "module",
-  "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "https://github.com/jwulf/nano-sdk-js.git" },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jwulf/nano-sdk-js.git"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
