@@ -17,7 +17,7 @@ import { NanoJobWorker } from "./nanoWorker.js";
 // breaks.
 export * from "@camunda8/orchestration-cluster-api";
 export { detectNano, type NanoInfo } from "./detect.js";
-export { CommandStreamTransport } from "./transport.js";
+export { CommandStreamTransport, SubmissionTimeoutError } from "./transport.js";
 export { EmbeddedTransport, type EmbeddedHost, type EmbeddedJob } from "./embedded.js";
 export { NanoJobWorker } from "./nanoWorker.js";
 
@@ -25,7 +25,7 @@ export { NanoJobWorker } from "./nanoWorker.js";
 export type NanoTransport = "auto" | "command-stream" | "rest" | "embedded";
 
 type AnyOpts = Parameters<typeof createCamundaClientBase>[0] & {
-  config?: Record<string, unknown> & { CAMUNDA_TRANSPORT?: NanoTransport; CAMUNDA_REST_ADDRESS?: string };
+  config?: Record<string, unknown> & { CAMUNDA_TRANSPORT?: NanoTransport; CAMUNDA_REST_ADDRESS?: string; CAMUNDA_NANO_SUBMIT_TIMEOUT_MS?: string | number };
   /** Embedded (ADR 0005) in-process engine host; required when transport is "embedded". */
   embeddedHost?: EmbeddedHost;
 };
@@ -34,6 +34,20 @@ function resolveMode(opts?: AnyOpts): NanoTransport {
   const fromOpts = opts?.config?.CAMUNDA_TRANSPORT as NanoTransport | undefined;
   const fromEnv = (typeof process !== "undefined" ? process.env?.CAMUNDA_TRANSPORT : undefined) as NanoTransport | undefined;
   return fromOpts ?? fromEnv ?? "auto";
+}
+
+/**
+ * Default client-side submission-timeout (ms) for command-stream creates, from
+ * `opts.config.CAMUNDA_NANO_SUBMIT_TIMEOUT_MS` or the env var. `undefined`/`0`
+ * means wait indefinitely under backpressure. A per-call `submitTimeoutMs` on
+ * `createProcessInstance` input overrides this.
+ */
+function resolveSubmitTimeoutMs(opts?: AnyOpts): number | undefined {
+  const raw =
+    (opts?.config?.CAMUNDA_NANO_SUBMIT_TIMEOUT_MS as string | number | undefined) ??
+    (typeof process !== "undefined" ? process.env?.CAMUNDA_NANO_SUBMIT_TIMEOUT_MS : undefined);
+  const n = typeof raw === "string" ? Number(raw) : raw;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 /** restAddress is normalized by the SDK to end with /v2; strip it for base. */
@@ -62,6 +76,7 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
 
   const restAddress = client.getConfig().restAddress;
   const base = baseFrom(restAddress);
+  const submitTimeoutMs = resolveSubmitTimeoutMs(opts);
 
   let transport: CommandStreamTransport | null = null;
   let nano: NanoInfo | null | undefined; // undefined = not yet probed
@@ -73,7 +88,7 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
         : await detectNano(base);
     }
     if (!nano) return null;
-    if (!transport) transport = new CommandStreamTransport(base, nano.commandStreamPath);
+    if (!transport) transport = new CommandStreamTransport(base, nano.commandStreamPath, submitTimeoutMs);
     return transport;
   };
   return wrapClient(client, ensure, () => transport?.close());
@@ -98,6 +113,7 @@ function wrapClient(
               variables: input?.variables,
               awaitCompletion: input?.awaitCompletion ?? false,
               fetchVariables: input?.fetchVariables,
+              submitTimeoutMs: input?.submitTimeoutMs,
             });
             if (r.status >= 400) throw new Error(`createInstance failed: ${r.status} ${JSON.stringify(r.body)}`);
             const body: any = r.body ?? {};

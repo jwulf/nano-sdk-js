@@ -34,6 +34,23 @@ interface Pending {
   reject: (e: unknown) => void;
 }
 
+/**
+ * Thrown by {@link CommandStreamTransport.createInstance} when the gateway does
+ * not acknowledge a create within `submitTimeoutMs`. On the command stream,
+ * admission backpressure is expressed by the server withholding submission
+ * credits (no `503`, no retry), so a create otherwise waits indefinitely for
+ * intake capacity. This turns that stall into a typed rejection — treat it as
+ * "the server is backpressured" and back off; do not tight-loop retry.
+ */
+export class SubmissionTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(
+      `create submission stalled: no gateway ack within ${timeoutMs}ms (server is applying admission backpressure)`,
+    );
+    this.name = "SubmissionTimeoutError";
+  }
+}
+
 export class CommandStreamTransport {
   private url: string;
   private ws: WebSocket | null = null;
@@ -45,9 +62,14 @@ export class CommandStreamTransport {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private connectPromise: Promise<void> | null = null;
   private closed = false;
+  private defaultSubmitTimeoutMs?: number;
 
-  constructor(restAddress: string, path: string) {
+  constructor(restAddress: string, path: string, defaultSubmitTimeoutMs?: number) {
     this.url = commandStreamUrl(restAddress, path);
+    this.defaultSubmitTimeoutMs =
+      defaultSubmitTimeoutMs !== undefined && defaultSubmitTimeoutMs > 0
+        ? defaultSubmitTimeoutMs
+        : undefined;
   }
 
   private nextCorr(): number {
@@ -163,6 +185,13 @@ export class CommandStreamTransport {
     awaitCompletion?: boolean;
     fetchVariables?: string[];
     requestTimeoutMs?: number;
+    /**
+     * Client-side bound (ms) on how long to wait for the gateway's create ack
+     * before rejecting with {@link SubmissionTimeoutError}. Overrides the
+     * transport-wide default. Omit to wait indefinitely under backpressure.
+     * Never sent on the wire — the server is unaware of it.
+     */
+    submitTimeoutMs?: number;
   }): Promise<{ status: number; body: unknown; completion?: { processCompleted: boolean; variables: unknown; processInstanceKey: string } }> {
     await this.connect();
     const corr = this.nextCorr();
@@ -171,8 +200,28 @@ export class CommandStreamTransport {
       ? new Promise<{ processCompleted: boolean; variables: unknown; processInstanceKey: string }>((r) => (completionResolve = r))
       : null;
     if (completionResolve) this.awaits.set(corr, completionResolve);
+    const submitTimeoutMs = input.submitTimeoutMs ?? this.defaultSubmitTimeoutMs;
     const result = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
-      this.pending.set(corr, { resolve, reject });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      this.pending.set(corr, {
+        resolve: (v) => {
+          if (timer !== undefined) clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          if (timer !== undefined) clearTimeout(timer);
+          reject(e);
+        },
+      });
+      if (submitTimeoutMs !== undefined && submitTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          // Drop the abandoned correlation so a late ack/completion doesn't leak.
+          this.pending.delete(corr);
+          this.awaits.delete(corr);
+          reject(new SubmissionTimeoutError(submitTimeoutMs));
+        }, submitTimeoutMs);
+        timer.unref?.();
+      }
       this.send({
         type: "createInstance",
         corr,

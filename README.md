@@ -34,6 +34,35 @@ const client = createCamundaClient({
 });
 ```
 
+## Failing fast under backpressure (`submitTimeoutMs`)
+
+On the command stream, admission backpressure is expressed by the server
+withholding submission credits (no `503`, no retry), so a `createProcessInstance`
+otherwise waits indefinitely for the gateway to ack. To fail fast instead, set a
+submit timeout — per call, or client-wide via config/env:
+
+```ts
+// Client-wide default (ms); per-call submitTimeoutMs wins when both are set.
+const client = createCamundaClient({
+  config: { CAMUNDA_REST_ADDRESS: "http://localhost:8080", CAMUNDA_NANO_SUBMIT_TIMEOUT_MS: 2000 },
+});
+
+import { SubmissionTimeoutError } from "@nanobpm/nano-sdk";
+
+try {
+  await client.createProcessInstance({ processDefinitionId: "order", submitTimeoutMs: 500 });
+} catch (err) {
+  if (err instanceof SubmissionTimeoutError) {
+    // Server is applying admission backpressure — back off, do NOT tight-loop retry.
+  }
+}
+```
+
+`submitTimeoutMs` is a **client-side** guard: it bounds only how long the client
+waits for the gateway's create ack and is never sent on the wire. On timeout the
+call rejects with `SubmissionTimeoutError` and the abandoned correlation is
+dropped so a late ack does not leak. Omit it (the default) to wait indefinitely.
+
 ## Build & verify
 
 ```sh
