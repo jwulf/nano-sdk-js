@@ -34,6 +34,14 @@ interface Pending {
   reject: (e: unknown) => void;
 }
 
+/** A create queued behind an exhausted submission-credit window. */
+interface CreditWaiter {
+  /** Grant a credit (decrement + resolve the acquire). */
+  grant: () => void;
+  /** Abandon the wait (reject the acquire), e.g. on disconnect. */
+  fail: (e: unknown) => void;
+}
+
 /**
  * Thrown by {@link CommandStreamTransport.createInstance} when the gateway does
  * not acknowledge a create within `submitTimeoutMs`. On the command stream,
@@ -63,6 +71,13 @@ export class CommandStreamTransport {
   private connectPromise: Promise<void> | null = null;
   private closed = false;
   private defaultSubmitTimeoutMs?: number;
+  /**
+   * Server-granted submission-credit window (seeded by `welcome`, topped up by
+   * `submissionCredits`). Mirrors the engine's intake metering so creates queue
+   * client-side under admission backpressure instead of flooding the gateway.
+   */
+  private credits = 0;
+  private creditWaiters: CreditWaiter[] = [];
 
   constructor(restAddress: string, path: string, defaultSubmitTimeoutMs?: number) {
     this.url = commandStreamUrl(restAddress, path);
@@ -103,6 +118,13 @@ export class CommandStreamTransport {
         };
         ws.onclose = () => {
           this.open = false;
+          // The credit window is per-connection; a reconnect's welcome re-grants
+          // a fresh one. Reset it and fail any queued creates so callers can retry
+          // on the new connection rather than hang against a dead window.
+          this.credits = 0;
+          const waiters = this.creditWaiters;
+          this.creditWaiters = [];
+          for (const w of waiters) w.fail(new Error("command-stream closed"));
           if (this.heartbeat) clearInterval(this.heartbeat);
           // Reject in-flight commands; resubscribe on reconnect.
           for (const p of this.pending.values()) p.reject(new Error("command-stream closed"));
@@ -125,12 +147,14 @@ export class CommandStreamTransport {
     switch (f.type) {
       case "welcome": {
         this.open = true;
+        this.credits = Number(f.submissionCredits ?? 0);
         const hb = Number(f.heartbeatMs ?? 0);
         if (hb > 0) {
           if (this.heartbeat) clearInterval(this.heartbeat);
           this.heartbeat = setInterval(() => this.send({ type: "heartbeat" }), hb);
         }
         for (const sub of this.subs.values()) this.sendSubscribe(sub);
+        this.releaseCreditWaiters();
         resolveConnect();
         break;
       }
@@ -162,7 +186,13 @@ export class CommandStreamTransport {
         }
         break;
       }
-      // submissionCredits / pressure / heartbeat: no client action needed yet.
+      case "submissionCredits": {
+        // Server topped up the create-side window (intake headroom returned).
+        this.credits += Number(f.n ?? 0);
+        this.releaseCreditWaiters();
+        break;
+      }
+      // pressure / heartbeat: no client action needed yet.
     }
   }
 
@@ -177,6 +207,50 @@ export class CommandStreamTransport {
     });
   }
 
+  // ----- submission-credit gating ------------------------------------------
+
+  /**
+   * Take one submission credit, waiting for the gateway to replenish when the
+   * window is exhausted (admission backpressure — no 503, no retry). When
+   * `timeoutMs` elapses first, rejects with {@link SubmissionTimeoutError} and
+   * removes the queued waiter so no credit slot leaks.
+   */
+  private acquireCredit(timeoutMs?: number): Promise<void> {
+    if (this.credits > 0) {
+      this.credits -= 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter: CreditWaiter = {
+        grant: () => {
+          if (timer !== undefined) clearTimeout(timer);
+          this.credits -= 1;
+          resolve();
+        },
+        fail: (e) => {
+          if (timer !== undefined) clearTimeout(timer);
+          reject(e);
+        },
+      };
+      this.creditWaiters.push(waiter);
+      if (timeoutMs !== undefined && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          const i = this.creditWaiters.indexOf(waiter);
+          if (i >= 0) this.creditWaiters.splice(i, 1);
+          reject(new SubmissionTimeoutError(timeoutMs));
+        }, timeoutMs);
+        timer.unref?.();
+      }
+    });
+  }
+
+  private releaseCreditWaiters(): void {
+    while (this.credits > 0 && this.creditWaiters.length > 0) {
+      this.creditWaiters.shift()!.grant();
+    }
+  }
+
   /** Create a process instance over the stream. */
   async createInstance(input: {
     processDefinitionId?: string;
@@ -186,42 +260,26 @@ export class CommandStreamTransport {
     fetchVariables?: string[];
     requestTimeoutMs?: number;
     /**
-     * Client-side bound (ms) on how long to wait for the gateway's create ack
-     * before rejecting with {@link SubmissionTimeoutError}. Overrides the
-     * transport-wide default. Omit to wait indefinitely under backpressure.
-     * Never sent on the wire — the server is unaware of it.
+     * Client-side bound (ms) on how long to wait for a submission credit before
+     * rejecting with {@link SubmissionTimeoutError}. Overrides the transport-wide
+     * default. Omit to wait indefinitely under backpressure. Never sent on the
+     * wire — the server is unaware of it.
      */
     submitTimeoutMs?: number;
   }): Promise<{ status: number; body: unknown; completion?: { processCompleted: boolean; variables: unknown; processInstanceKey: string } }> {
     await this.connect();
+    // Gate intake on the server's submission-credit window: block here (bounded
+    // by submitTimeoutMs) rather than flooding the gateway with creates it has
+    // not granted capacity for. Job completions stay unmetered.
+    await this.acquireCredit(input.submitTimeoutMs ?? this.defaultSubmitTimeoutMs);
     const corr = this.nextCorr();
     let completionResolve: ((v: { processCompleted: boolean; variables: unknown; processInstanceKey: string }) => void) | null = null;
     const completion = input.awaitCompletion
       ? new Promise<{ processCompleted: boolean; variables: unknown; processInstanceKey: string }>((r) => (completionResolve = r))
       : null;
     if (completionResolve) this.awaits.set(corr, completionResolve);
-    const submitTimeoutMs = input.submitTimeoutMs ?? this.defaultSubmitTimeoutMs;
     const result = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      this.pending.set(corr, {
-        resolve: (v) => {
-          if (timer !== undefined) clearTimeout(timer);
-          resolve(v);
-        },
-        reject: (e) => {
-          if (timer !== undefined) clearTimeout(timer);
-          reject(e);
-        },
-      });
-      if (submitTimeoutMs !== undefined && submitTimeoutMs > 0) {
-        timer = setTimeout(() => {
-          // Drop the abandoned correlation so a late ack/completion doesn't leak.
-          this.pending.delete(corr);
-          this.awaits.delete(corr);
-          reject(new SubmissionTimeoutError(submitTimeoutMs));
-        }, submitTimeoutMs);
-        timer.unref?.();
-      }
+      this.pending.set(corr, { resolve, reject });
       this.send({
         type: "createInstance",
         corr,

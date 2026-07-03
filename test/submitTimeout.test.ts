@@ -6,33 +6,33 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { CommandStreamTransport, SubmissionTimeoutError } from "../src/transport.js";
 
-/**
- * Mock command stream that welcomes the client but (by default) never acks a
- * createInstance, so we can drive the submit-timeout path deterministically.
- */
-function startMockGateway(ackCreates: boolean): Promise<{
-  restAddress: string;
-  close: () => Promise<void>;
-}> {
+interface MockOpts {
+  /** Initial submission-credit window advertised in `welcome`. */
+  credits: number;
+  /** Ack every createInstance with a 200 commandResult. */
+  ackCreates?: boolean;
+  /** Grant extra credits (via a `submissionCredits` frame) after `grantAfterMs`. */
+  grantAfterMs?: number;
+  grantN?: number;
+}
+
+/** Mock command stream with a controllable submission-credit window. */
+function startMockGateway(opts: MockOpts): Promise<{ restAddress: string; close: () => Promise<void> }> {
   return new Promise((resolve) => {
     const http: Server = createServer();
     const wss = new WebSocketServer({ server: http });
     const sockets: WebSocket[] = [];
     wss.on("connection", (ws) => {
       sockets.push(ws);
-      ws.send(JSON.stringify({ type: "welcome", submissionCredits: 256, heartbeatMs: 0 }));
+      ws.send(JSON.stringify({ type: "welcome", submissionCredits: opts.credits, heartbeatMs: 0 }));
+      if (opts.grantAfterMs !== undefined) {
+        setTimeout(() => ws.send(JSON.stringify({ type: "submissionCredits", n: opts.grantN ?? 1 })), opts.grantAfterMs);
+      }
       ws.on("message", (data) => {
-        if (!ackCreates) return;
+        if (!opts.ackCreates) return;
         const frame = JSON.parse(data.toString());
         if (frame.type === "createInstance") {
-          ws.send(
-            JSON.stringify({
-              type: "commandResult",
-              corr: frame.corr,
-              status: 200,
-              body: { processInstanceKey: "1" },
-            }),
-          );
+          ws.send(JSON.stringify({ type: "commandResult", corr: frame.corr, status: 200, body: { processInstanceKey: "1" } }));
         }
       });
     });
@@ -50,33 +50,41 @@ function startMockGateway(ackCreates: boolean): Promise<{
   });
 }
 
-describe("CommandStreamTransport submit timeout", () => {
+describe("CommandStreamTransport submission-credit gating", () => {
   let gw: Awaited<ReturnType<typeof startMockGateway>>;
 
   afterEach(async () => {
     if (gw) await gw.close();
   });
 
-  it("rejects with SubmissionTimeoutError when the gateway never acks in time", async () => {
-    gw = await startMockGateway(false);
+  it("rejects with SubmissionTimeoutError when no credit is granted in time", async () => {
+    gw = await startMockGateway({ credits: 0 });
     const t = new CommandStreamTransport(gw.restAddress, "/command-stream");
-    await expect(
-      t.createInstance({ processDefinitionId: "p", submitTimeoutMs: 50 }),
-    ).rejects.toBeInstanceOf(SubmissionTimeoutError);
-    t.close();
-  });
-
-  it("honours the transport-wide default submit timeout", async () => {
-    gw = await startMockGateway(false);
-    const t = new CommandStreamTransport(gw.restAddress, "/command-stream", 40);
-    await expect(t.createInstance({ processDefinitionId: "p" })).rejects.toBeInstanceOf(
+    await expect(t.createInstance({ processDefinitionId: "p", submitTimeoutMs: 50 })).rejects.toBeInstanceOf(
       SubmissionTimeoutError,
     );
     t.close();
   });
 
-  it("resolves normally (no timeout) when the gateway acks", async () => {
-    gw = await startMockGateway(true);
+  it("honours the transport-wide default submit timeout", async () => {
+    gw = await startMockGateway({ credits: 0 });
+    const t = new CommandStreamTransport(gw.restAddress, "/command-stream", 40);
+    await expect(t.createInstance({ processDefinitionId: "p" })).rejects.toBeInstanceOf(SubmissionTimeoutError);
+    t.close();
+  });
+
+  it("gates the create until a credit is granted, then proceeds", async () => {
+    // Window starts empty; the create queues and only fires once the server tops
+    // up credits -- proving the client waits on the credit, not just the ack.
+    gw = await startMockGateway({ credits: 0, ackCreates: true, grantAfterMs: 60, grantN: 1 });
+    const t = new CommandStreamTransport(gw.restAddress, "/command-stream", 1000);
+    const r = await t.createInstance({ processDefinitionId: "p" });
+    expect(r.status).toBe(200);
+    t.close();
+  });
+
+  it("consumes the welcome window without waiting when credits are available", async () => {
+    gw = await startMockGateway({ credits: 4, ackCreates: true });
     const t = new CommandStreamTransport(gw.restAddress, "/command-stream", 1000);
     const r = await t.createInstance({ processDefinitionId: "p", submitTimeoutMs: 1000 });
     expect(r.status).toBe(200);

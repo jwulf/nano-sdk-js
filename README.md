@@ -13,7 +13,7 @@ Everything else is re-exported unchanged — same types, same client, same API.
 
 When the client detects a Nano server, two hot paths move from REST onto a single persistent WebSocket (`/command-stream`):
 
-- **`createProcessInstance`** → `createInstance` frame (with `awaitCompletion` resolved via `instanceCompleted`).
+- **`createProcessInstance`** → `createInstance` frame, gated on the server's submission-credit window (with `awaitCompletion` resolved via `instanceCompleted`).
 - **`createJobWorker`** → `subscribe` + pushed `job` frames, acked with `completeJob`/`failJob`/`throwError` and credit-replenished.
 
 This avoids the ~125 creates/s/conn ceiling of the REST long-poll path.
@@ -58,10 +58,12 @@ try {
 }
 ```
 
-`submitTimeoutMs` is a **client-side** guard: it bounds only how long the client
-waits for the gateway's create ack and is never sent on the wire. On timeout the
-call rejects with `SubmissionTimeoutError` and the abandoned correlation is
-dropped so a late ack does not leak. Omit it (the default) to wait indefinitely.
+`submitTimeoutMs` is a **client-side** guard: the SDK gates each create on the
+server's submission-credit window (queuing client-side under backpressure rather
+than flooding the gateway), and this bounds how long it waits for a credit before
+rejecting with `SubmissionTimeoutError`. It is never sent on the wire. On timeout
+the queued create is dropped so no credit slot leaks. Omit it (the default) to
+wait indefinitely.
 
 ## Build & verify
 
