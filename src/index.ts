@@ -3,13 +3,13 @@
 // It re-exports the entire upstream SDK surface, then overrides
 // `createCamundaClient` (and the default export) so that, when connected to a
 // Nano server, process-instance creation and job workers transparently upgrade
-// to Nano's command-stream protocol. Against stock Camunda 8 it is a no-op: the
+// to Nano's Falcon protocol. Against stock Camunda 8 it is a no-op: the
 // upstream REST behaviour is used unchanged.
 import {
   createCamundaClient as createCamundaClientBase,
 } from "@camunda8/orchestration-cluster-api";
 import { detectNano, normalizeBase, type NanoInfo } from "./detect.js";
-import { CommandStreamTransport } from "./transport.js";
+import { FalconTransport } from "./transport.js";
 import { EmbeddedTransport, type EmbeddedHost } from "./embedded.js";
 import { NanoJobWorker } from "./nanoWorker.js";
 
@@ -17,12 +17,12 @@ import { NanoJobWorker } from "./nanoWorker.js";
 // breaks.
 export * from "@camunda8/orchestration-cluster-api";
 export { detectNano, type NanoInfo } from "./detect.js";
-export { CommandStreamTransport, SubmissionTimeoutError } from "./transport.js";
+export { FalconTransport, SubmissionTimeoutError } from "./transport.js";
 export { EmbeddedTransport, type EmbeddedHost, type EmbeddedJob } from "./embedded.js";
 export { NanoJobWorker } from "./nanoWorker.js";
 
-/** auto: upgrade only on Nano. command-stream: force. rest: never upgrade. embedded: in-process μ-nano. */
-export type NanoTransport = "auto" | "command-stream" | "rest" | "embedded";
+/** auto: upgrade only on Nano. falcon: force. rest: never upgrade. embedded: in-process μ-nano. */
+export type NanoTransport = "auto" | "falcon" | "rest" | "embedded";
 
 type AnyOpts = Parameters<typeof createCamundaClientBase>[0] & {
   config?: Record<string, unknown> & { CAMUNDA_TRANSPORT?: NanoTransport; CAMUNDA_REST_ADDRESS?: string; CAMUNDA_NANO_SUBMIT_TIMEOUT_MS?: string | number };
@@ -37,7 +37,7 @@ function resolveMode(opts?: AnyOpts): NanoTransport {
 }
 
 /**
- * Default client-side submission-timeout (ms) for command-stream creates, from
+ * Default client-side submission-timeout (ms) for falcon creates, from
  * `opts.config.CAMUNDA_NANO_SUBMIT_TIMEOUT_MS` or the env var. `undefined`/`0`
  * means wait indefinitely under backpressure. A per-call `submitTimeoutMs` on
  * `createProcessInstance` input overrides this.
@@ -58,8 +58,8 @@ function baseFrom(restAddress: string): string {
 /**
  * Drop-in replacement for the upstream createCamundaClient. Returns the upstream
  * client wrapped in a Proxy that upgrades createProcessInstance + createJobWorker
- * to the command stream when connected to a Nano server (overridable via the
- * CAMUNDA_TRANSPORT config: "auto" | "command-stream" | "rest").
+ * to the Falcon protocol when connected to a Nano server (overridable via the
+ * CAMUNDA_TRANSPORT config: "auto" | "falcon" | "rest").
  */
 export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCamundaClientBase> {
   const client = createCamundaClientBase(opts as any);
@@ -78,24 +78,24 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
   const base = baseFrom(restAddress);
   const submitTimeoutMs = resolveSubmitTimeoutMs(opts);
 
-  let transport: CommandStreamTransport | null = null;
+  let transport: FalconTransport | null = null;
   let nano: NanoInfo | null | undefined; // undefined = not yet probed
 
-  const ensure = async (): Promise<CommandStreamTransport | null> => {
+  const ensure = async (): Promise<FalconTransport | null> => {
     if (nano === undefined) {
-      nano = mode === "command-stream"
-        ? { engine: "nanobpmn", commandStreamPath: "/command-stream" }
+      nano = mode === "falcon"
+        ? { engine: "nanobpmn", falconPath: "/falcon" }
         : await detectNano(base);
     }
     if (!nano) return null;
-    if (!transport) transport = new CommandStreamTransport(base, nano.commandStreamPath, submitTimeoutMs);
+    if (!transport) transport = new FalconTransport(base, nano.falconPath, submitTimeoutMs);
     return transport;
   };
   return wrapClient(client, ensure, () => transport?.close());
 }
 
 /** Wrap an upstream client, upgrading createProcessInstance + createJobWorker to
- *  a Nano transport (command-stream or embedded) when `ensure` yields one. */
+ *  a Nano transport (falcon or embedded) when `ensure` yields one. */
 function wrapClient(
   client: ReturnType<typeof createCamundaClientBase>,
   ensure: () => Promise<{ createInstance: Function; subscribe: Function; close: Function } | null>,

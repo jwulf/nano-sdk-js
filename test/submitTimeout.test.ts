@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { CommandStreamTransport, SubmissionTimeoutError } from "../src/transport.js";
+import { FalconTransport, SubmissionTimeoutError } from "../src/transport.js";
 
 interface MockOpts {
   /** Initial submission-credit window advertised in `welcome`. */
@@ -16,7 +16,7 @@ interface MockOpts {
   grantN?: number;
 }
 
-/** Mock command stream with a controllable submission-credit window. */
+/** Mock Falcon protocol with a controllable submission-credit window. */
 function startMockGateway(opts: MockOpts): Promise<{ restAddress: string; close: () => Promise<void> }> {
   return new Promise((resolve) => {
     const http: Server = createServer();
@@ -50,7 +50,7 @@ function startMockGateway(opts: MockOpts): Promise<{ restAddress: string; close:
   });
 }
 
-describe("CommandStreamTransport submission-credit gating", () => {
+describe("FalconTransport submission-credit gating", () => {
   let gw: Awaited<ReturnType<typeof startMockGateway>>;
 
   afterEach(async () => {
@@ -59,7 +59,7 @@ describe("CommandStreamTransport submission-credit gating", () => {
 
   it("rejects with SubmissionTimeoutError when no credit is granted in time", async () => {
     gw = await startMockGateway({ credits: 0 });
-    const t = new CommandStreamTransport(gw.restAddress, "/command-stream");
+    const t = new FalconTransport(gw.restAddress, "/falcon");
     await expect(t.createInstance({ processDefinitionId: "p", submitTimeoutMs: 50 })).rejects.toBeInstanceOf(
       SubmissionTimeoutError,
     );
@@ -68,7 +68,7 @@ describe("CommandStreamTransport submission-credit gating", () => {
 
   it("honours the transport-wide default submit timeout", async () => {
     gw = await startMockGateway({ credits: 0 });
-    const t = new CommandStreamTransport(gw.restAddress, "/command-stream", 40);
+    const t = new FalconTransport(gw.restAddress, "/falcon", 40);
     await expect(t.createInstance({ processDefinitionId: "p" })).rejects.toBeInstanceOf(SubmissionTimeoutError);
     t.close();
   });
@@ -77,7 +77,7 @@ describe("CommandStreamTransport submission-credit gating", () => {
     // Window starts empty; the create queues and only fires once the server tops
     // up credits -- proving the client waits on the credit, not just the ack.
     gw = await startMockGateway({ credits: 0, ackCreates: true, grantAfterMs: 60, grantN: 1 });
-    const t = new CommandStreamTransport(gw.restAddress, "/command-stream", 1000);
+    const t = new FalconTransport(gw.restAddress, "/falcon", 1000);
     const r = await t.createInstance({ processDefinitionId: "p" });
     expect(r.status).toBe(200);
     t.close();
@@ -85,7 +85,7 @@ describe("CommandStreamTransport submission-credit gating", () => {
 
   it("consumes the welcome window without waiting when credits are available", async () => {
     gw = await startMockGateway({ credits: 4, ackCreates: true });
-    const t = new CommandStreamTransport(gw.restAddress, "/command-stream", 1000);
+    const t = new FalconTransport(gw.restAddress, "/falcon", 1000);
     const r = await t.createInstance({ processDefinitionId: "p", submitTimeoutMs: 1000 });
     expect(r.status).toBe(200);
     t.close();

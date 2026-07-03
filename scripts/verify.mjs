@@ -1,6 +1,6 @@
 // End-to-end check against a running Nano server (default http://localhost:8080).
-// Deploys a tiny one-task process, runs a command-stream worker, creates an
-// instance, and asserts the SDK upgraded to the command stream.
+// Deploys a tiny one-task process, runs a falcon worker, creates an
+// instance, and asserts the SDK upgraded to the Falcon protocol.
 import { createCamundaClient } from "../dist/index.js";
 
 const BASE = (process.env.NANOBPMN_BASE_URL ?? "http://localhost:8080").replace(/\/+$/, "");
@@ -33,6 +33,6 @@ await new Promise((r) => setTimeout(r, 800));
 const inst = await client.createProcessInstance({ processDefinitionId: PID, awaitCompletion: true });
 console.log("instance:", inst.processInstanceKey, "completed=", !!inst.processInstanceKey);
 await new Promise((r) => setTimeout(r, 500));
-console.log(`jobs handled over command stream: ${handled}`);
+console.log(`jobs handled over Falcon protocol: ${handled}`);
 client.stopAllWorkers?.();
 process.exit(handled > 0 && inst.processInstanceKey ? 0 : 1);

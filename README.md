@@ -1,6 +1,6 @@
 # @nanobpm/nano-sdk
 
-A **drop-in replacement** for [`@camunda8/orchestration-cluster-api`](https://www.npmjs.com/package/@camunda8/orchestration-cluster-api) that transparently upgrades to Nano's **command-stream** protocol when connected to a [Nano](../nanobpmn) server. Against stock Camunda 8 it behaves exactly like the upstream SDK.
+A **drop-in replacement** for [`@camunda8/orchestration-cluster-api`](https://www.npmjs.com/package/@camunda8/orchestration-cluster-api) that transparently upgrades to Nano's **falcon** protocol when connected to a [Nano](../nanobpmn) server. Against stock Camunda 8 it behaves exactly like the upstream SDK.
 
 ```diff
 - import { createCamundaClient } from "@camunda8/orchestration-cluster-api";
@@ -11,7 +11,7 @@ Everything else is re-exported unchanged — same types, same client, same API.
 
 ## What gets upgraded
 
-When the client detects a Nano server, two hot paths move from REST onto a single persistent WebSocket (`/command-stream`):
+When the client detects a Nano server, two hot paths move from REST onto a single persistent WebSocket (`/falcon`):
 
 - **`createProcessInstance`** → `createInstance` frame, gated on the server's submission-credit window (with `awaitCompletion` resolved via `instanceCompleted`).
 - **`createJobWorker`** → `subscribe` + pushed `job` frames, acked with `completeJob`/`failJob`/`throwError` and credit-replenished.
@@ -20,12 +20,12 @@ This avoids the ~125 creates/s/conn ceiling of the REST long-poll path.
 
 ## Detection & override
 
-Detection is automatic: the SDK probes `GET /v2/topology` once and looks for the Nano `commandStreamPath` advertisement. Control it via the `CAMUNDA_TRANSPORT` config (or env var):
+Detection is automatic: the SDK probes `GET /v2/topology` once and looks for the Nano `falconPath` advertisement. Control it via the `CAMUNDA_TRANSPORT` config (or env var):
 
 | value            | behaviour                                   |
 | ---------------- | ------------------------------------------- |
-| `auto` (default) | command-stream on Nano, REST elsewhere      |
-| `command-stream` | force the stream (assume Nano)              |
+| `auto` (default) | falcon on Nano, REST elsewhere      |
+| `falcon` | force the stream (assume Nano)              |
 | `rest`           | never upgrade — pure upstream behaviour     |
 
 ```ts
@@ -36,7 +36,7 @@ const client = createCamundaClient({
 
 ## Failing fast under backpressure (`submitTimeoutMs`)
 
-On the command stream, admission backpressure is expressed by the server
+On the Falcon protocol, admission backpressure is expressed by the server
 withholding submission credits (no `503`, no retry), so a `createProcessInstance`
 otherwise waits indefinitely for the gateway to ack. To fail fast instead, set a
 submit timeout — per call, or client-wide via config/env:

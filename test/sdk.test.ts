@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { commandStreamUrl, normalizeBase } from "../src/detect.js";
+import { falconUrl, normalizeBase } from "../src/detect.js";
 import { createCamundaClient } from "../src/index.js";
 
 describe("detect", () => {
   it("normalizes base and builds ws url", () => {
     expect(normalizeBase("http://x:8080///")).toBe("http://x:8080");
-    expect(commandStreamUrl("http://x:8080", "/command-stream")).toBe("ws://x:8080/command-stream");
-    expect(commandStreamUrl("https://x", "/command-stream")).toBe("wss://x/command-stream");
+    expect(falconUrl("http://x:8080", "/falcon")).toBe("ws://x:8080/falcon");
+    expect(falconUrl("https://x", "/falcon")).toBe("wss://x/falcon");
   });
 });
 

@@ -1,11 +1,11 @@
 // Nano server detection. A nanobpmn gateway advertises itself on GET /v2/topology
-// via a `nano` block carrying `commandStreamPath`. Detecting it lets the SDK
-// upgrade to the command-stream protocol transparently.
+// via a `nano` block carrying `falconPath`. Detecting it lets the SDK
+// upgrade to the Falcon protocol transparently.
 
 export interface NanoInfo {
   engine: string;
   version?: string;
-  commandStreamPath: string;
+  falconPath: string;
 }
 
 const cache = new Map<string, NanoInfo | null>();
@@ -33,11 +33,11 @@ export async function detectNano(
     if (res.ok) {
       const body: any = await res.json().catch(() => ({}));
       const nano = body?.nano;
-      if (nano && typeof nano.commandStreamPath === "string") {
+      if (nano && typeof nano.falconPath === "string") {
         info = {
           engine: String(nano.engine ?? "nanobpmn"),
           version: nano.version ? String(nano.version) : undefined,
-          commandStreamPath: nano.commandStreamPath,
+          falconPath: nano.falconPath,
         };
       }
     }
@@ -53,8 +53,8 @@ export function _clearDetectionCache(): void {
   cache.clear();
 }
 
-/** Build the ws:// or wss:// command-stream URL from a REST base + path. */
-export function commandStreamUrl(restAddress: string, path: string): string {
+/** Build the ws:// or wss:// falcon URL from a REST base + path. */
+export function falconUrl(restAddress: string, path: string): string {
   let base = normalizeBase(restAddress);
   if (base.startsWith("https://")) base = "wss://" + base.slice("https://".length);
   else if (base.startsWith("http://")) base = "ws://" + base.slice("http://".length);

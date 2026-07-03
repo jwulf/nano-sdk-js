@@ -1,11 +1,11 @@
-// Command-stream transport. One persistent WebSocket per client multiplexes:
+// Falcon transport. One persistent WebSocket per client multiplexes:
 //   * createInstance (corr-correlated CommandResult, awaitCompletion via
 //     InstanceCompleted), and
 //   * job subscriptions (welcome -> subscribe -> job push, replenished by
 //     jobCredits; completeJob/failJob/throwError as unmetered drains).
-// Mirrors the protocol implemented by the engine (server/src/command_stream.rs)
+// Mirrors the protocol implemented by the engine (server/src/falcon.rs)
 // and the embedded worker SDK (server/src/console/worker_sdk.ts).
-import { commandStreamUrl } from "./detect.js";
+import { falconUrl } from "./detect.js";
 import { getWebSocket } from "./ws.js";
 
 type Json = Record<string, unknown>;
@@ -43,8 +43,8 @@ interface CreditWaiter {
 }
 
 /**
- * Thrown by {@link CommandStreamTransport.createInstance} when the gateway does
- * not acknowledge a create within `submitTimeoutMs`. On the command stream,
+ * Thrown by {@link FalconTransport.createInstance} when the gateway does
+ * not acknowledge a create within `submitTimeoutMs`. On the Falcon protocol,
  * admission backpressure is expressed by the server withholding submission
  * credits (no `503`, no retry), so a create otherwise waits indefinitely for
  * intake capacity. This turns that stall into a typed rejection — treat it as
@@ -59,7 +59,7 @@ export class SubmissionTimeoutError extends Error {
   }
 }
 
-export class CommandStreamTransport {
+export class FalconTransport {
   private url: string;
   private ws: WebSocket | null = null;
   private open = false;
@@ -80,7 +80,7 @@ export class CommandStreamTransport {
   private creditWaiters: CreditWaiter[] = [];
 
   constructor(restAddress: string, path: string, defaultSubmitTimeoutMs?: number) {
-    this.url = commandStreamUrl(restAddress, path);
+    this.url = falconUrl(restAddress, path);
     this.defaultSubmitTimeoutMs =
       defaultSubmitTimeoutMs !== undefined && defaultSubmitTimeoutMs > 0
         ? defaultSubmitTimeoutMs
@@ -114,7 +114,7 @@ export class CommandStreamTransport {
           this.handle(f, resolve);
         };
         ws.onerror = () => {
-          if (!this.open) reject(new Error(`command-stream connect failed: ${this.url}`));
+          if (!this.open) reject(new Error(`falcon connect failed: ${this.url}`));
         };
         ws.onclose = () => {
           this.open = false;
@@ -124,10 +124,10 @@ export class CommandStreamTransport {
           this.credits = 0;
           const waiters = this.creditWaiters;
           this.creditWaiters = [];
-          for (const w of waiters) w.fail(new Error("command-stream closed"));
+          for (const w of waiters) w.fail(new Error("falcon closed"));
           if (this.heartbeat) clearInterval(this.heartbeat);
           // Reject in-flight commands; resubscribe on reconnect.
-          for (const p of this.pending.values()) p.reject(new Error("command-stream closed"));
+          for (const p of this.pending.values()) p.reject(new Error("falcon closed"));
           this.pending.clear();
           if (!this.closed) setTimeout(() => void this.reconnect(), 1000);
         };

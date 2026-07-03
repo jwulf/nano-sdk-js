@@ -1,9 +1,9 @@
-// A drop-in JobWorker that drains jobs over the command stream. Mirrors the
+// A drop-in JobWorker that drains jobs over the Falcon protocol. Mirrors the
 // upstream JobWorker surface (close/stop/start) but receives pushed jobs instead
 // of long-polling. Each handled job replenishes one credit, keeping demand at
 // maxParallelJobs.
 import { JobActionReceiptSymbol as JobActionReceipt } from "@camunda8/orchestration-cluster-api";
-import type { CommandStreamTransport, JobFrame } from "./transport.js";
+import type { FalconTransport, JobFrame } from "./transport.js";
 
 export interface NanoJobWorkerConfig {
   jobType: string;
@@ -16,14 +16,14 @@ export interface NanoJobWorkerConfig {
 }
 
 export class NanoJobWorker {
-  private transport: CommandStreamTransport;
+  private transport: FalconTransport;
   private cfg: NanoJobWorkerConfig;
   private credits: number;
   private stopped = false;
   readonly jobType: string;
   readonly name: string;
 
-  constructor(transport: CommandStreamTransport, cfg: NanoJobWorkerConfig) {
+  constructor(transport: FalconTransport, cfg: NanoJobWorkerConfig) {
     this.transport = transport;
     this.cfg = cfg;
     this.jobType = cfg.jobType;
@@ -33,7 +33,7 @@ export class NanoJobWorker {
   }
 
   /** Bind the transport after async Nano detection. */
-  bindTransport(transport: CommandStreamTransport): void {
+  bindTransport(transport: FalconTransport): void {
     this.transport = transport;
   }
 

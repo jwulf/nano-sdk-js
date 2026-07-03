@@ -1,5 +1,5 @@
 // Embedded transport (ADR 0005, realization (a) "in-process direct"). Satisfies
-// the same operation seam the command-stream transport does — createInstance,
+// the same operation seam the falcon transport does — createInstance,
 // subscribe/job-push, complete/fail/throw — but calls an in-process EmbeddedHost
 // directly: no sockets, no frames. The host wraps μ-nano.wasm and owns the wall
 // clock, durable journal, and timer/dispatch tick. Bind it via
@@ -37,7 +37,7 @@ interface Sub {
 }
 
 /** Pull-based dispatch over an in-process host. Structurally compatible with the
- *  CommandStreamTransport surface used by NanoJobWorker + the client proxy. */
+ *  FalconTransport surface used by NanoJobWorker + the client proxy. */
 export class EmbeddedTransport {
   private subs = new Map<string, Sub>();
   private timer: ReturnType<typeof setInterval> | null = null;
