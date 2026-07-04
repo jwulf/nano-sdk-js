@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/jwulf/nano-sdk-js/compare/v1.1.0...v1.2.0) (2026-07-04)
+
+
+### Features
+
+* graceful Falcon fallback + CAMUNDA_FORCE_REST escape hatch (1.1.0) ([f96fdb1](https://github.com/jwulf/nano-sdk-js/commit/f96fdb13cfe0271e33b37db906142ab8b8d72b7c))
+
 # [1.1.0](https://github.com/jwulf/nano-sdk-js/compare/v1.0.0...v1.1.0) (2026-07-04)
 
 
