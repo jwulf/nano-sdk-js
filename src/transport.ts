@@ -6,9 +6,29 @@
 // Mirrors the protocol implemented by the engine (server/src/falcon.rs)
 // and the embedded worker SDK (server/src/console/worker_sdk.ts).
 import { falconUrl } from "./detect.js";
+import type { ServerFrameType } from "./generated/falconFrames.js";
 import { getWebSocket } from "./ws.js";
 
 type Json = Record<string, unknown>;
+
+/**
+ * Compile-time drift guard: every documented server frame `type` maps to `true`
+ * here. `ServerFrameType` is generated from the Falcon AsyncAPI spec, so after
+ * regenerating (`npm run generate`) a newly documented server frame makes this
+ * object literal error ("property missing") until it is handled in
+ * {@link FalconTransport}'s `handle` switch (or explicitly parked as advisory).
+ * Mirrors the server-side exhaustiveness tripwire in `server/src/falcon.rs`.
+ */
+const HANDLED_SERVER_FRAMES: Record<ServerFrameType, true> = {
+  welcome: true,
+  job: true,
+  commandResult: true,
+  instanceCompleted: true,
+  submissionCredits: true,
+  pressure: true,
+  workerAdvice: true,
+  heartbeat: true,
+};
 
 export interface JobFrame {
   jobKey: string;
@@ -192,7 +212,19 @@ export class FalconTransport {
         this.releaseCreditWaiters();
         break;
       }
-      // pressure / heartbeat: no client action needed yet.
+      case "pressure":
+      case "workerAdvice":
+      case "heartbeat":
+        // Advisory server frames: no client action needed yet. `workerAdvice`
+        // could later drive subscriber self-sizing; `pressure` a backoff hint.
+        break;
+      default:
+        // Forward-compatible: silently ignore any frame this client version
+        // does not recognise, so a newer server never breaks an older client.
+        // (Known-but-advisory frames are handled above; this is the unknown
+        // tail. `HANDLED_SERVER_FRAMES` is the spec-drift guard for the set.)
+        void HANDLED_SERVER_FRAMES;
+        break;
     }
   }
 

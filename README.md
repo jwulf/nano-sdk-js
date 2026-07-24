@@ -69,8 +69,26 @@ wait indefinitely.
 
 ```sh
 npm install
-npm run build
-npm run verify   # against a running Nano server on :8080
+npm run generate  # regenerate Falcon frame types from spec/falcon.asyncapi.yaml
+npm run build     # runs generate, then tsup
+npm run verify    # against a running Nano server on :8080
 ```
 
 `upstream-ref/` holds the cloned upstream SDK source for reference; the published package is the thin wrapper in `src/`.
+
+## Falcon frame types (generated)
+
+`src/generated/falconFrames.ts` is generated from `spec/falcon.asyncapi.yaml`
+by `scripts/generate-falcon.mjs` (run via `npm run generate`, also part of
+`build`). The spec is a **copied source of truth** from the nanobpmn server repo
+(`docs/falcon.asyncapi.yaml`); update it there first, then copy it in and
+regenerate. CI fails if the committed generated file drifts from the spec.
+
+The generator emits an interface per frame plus `ClientFrame` / `ServerFrame`
+discriminated unions and `ClientFrameType` / `ServerFrameType` tag unions.
+`src/transport.ts` uses `ServerFrameType` as a compile-time exhaustiveness guard
+(`HANDLED_SERVER_FRAMES`): a newly documented server frame fails the build until
+it is handled (or explicitly parked as advisory), mirroring the server-side
+tripwire in `server/src/falcon.rs`. Unknown/forward-compatible frames are always
+ignored gracefully, so a newer server never breaks an older client.
+
