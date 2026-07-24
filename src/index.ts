@@ -20,6 +20,12 @@ export { detectNano, type NanoInfo } from "./detect.js";
 export { FalconTransport, SubmissionTimeoutError } from "./transport.js";
 export { EmbeddedTransport, type EmbeddedHost, type EmbeddedJob } from "./embedded.js";
 export { NanoJobWorker } from "./nanoWorker.js";
+export type {
+  ClientFrame,
+  ClientFrameType,
+  ServerFrame,
+  ServerFrameType,
+} from "./generated/falconFrames.js";
 
 /** auto: upgrade only on Nano. falcon: force. rest: never upgrade. embedded: in-process μ-nano. */
 export type NanoTransport = "auto" | "falcon" | "rest" | "embedded";
