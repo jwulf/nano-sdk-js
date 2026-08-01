@@ -10,6 +10,17 @@ import { getWebSocket } from "./ws.js";
 
 type Json = Record<string, unknown>;
 
+/**
+ * Sleep for `ms`, without keeping the event loop alive on its own — a pending
+ * reconnect backoff must never stop the host process from exiting.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms) as { unref?: () => void };
+    t.unref?.();
+  });
+}
+
 export interface JobFrame {
   jobKey: string;
   type: string;
@@ -70,6 +81,8 @@ export class FalconTransport {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private connectPromise: Promise<void> | null = null;
   private closed = false;
+  /** True while the background reconnect loop is running (prevents overlap). */
+  private reconnecting = false;
   private defaultSubmitTimeoutMs?: number;
   /**
    * Server-granted submission-credit window (seeded by `welcome`, topped up by
@@ -99,48 +112,139 @@ export class FalconTransport {
   async connect(): Promise<void> {
     if (this.open) return;
     if (this.connectPromise) return this.connectPromise;
-    this.connectPromise = new Promise<void>((resolve, reject) => {
-      void getWebSocket().then((WS) => {
-        const ws = new WS(this.url);
-        this.ws = ws;
-        ws.onopen = () => {};
-        ws.onmessage = (ev: MessageEvent) => {
-          let f: Json;
-          try {
-            f = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data));
-          } catch {
-            return;
-          }
-          this.handle(f, resolve);
-        };
-        ws.onerror = () => {
-          if (!this.open) reject(new Error(`falcon connect failed: ${this.url}`));
-        };
-        ws.onclose = () => {
-          this.open = false;
-          // The credit window is per-connection; a reconnect's welcome re-grants
-          // a fresh one. Reset it and fail any queued creates so callers can retry
-          // on the new connection rather than hang against a dead window.
-          this.credits = 0;
-          const waiters = this.creditWaiters;
-          this.creditWaiters = [];
-          for (const w of waiters) w.fail(new Error("falcon closed"));
-          if (this.heartbeat) clearInterval(this.heartbeat);
-          // Reject in-flight commands; resubscribe on reconnect.
-          for (const p of this.pending.values()) p.reject(new Error("falcon closed"));
-          this.pending.clear();
-          if (!this.closed) setTimeout(() => void this.reconnect(), 1000);
-        };
-      });
-    });
-    return this.connectPromise;
+    // Initial connect fails fast (reject-once) so the caller sees a prompt error,
+    // but we clear the shared promise on failure so a later call can retry cleanly.
+    // Only *background* reconnects (after an unexpected drop) loop; see
+    // {@link reconnectLoop}.
+    const p = this.openSocket();
+    this.connectPromise = p;
+    try {
+      await p;
+    } catch (e) {
+      if (this.connectPromise === p) this.connectPromise = null;
+      throw e;
+    }
   }
 
-  private async reconnect(): Promise<void> {
-    this.connectPromise = null;
-    this.open = false;
-    await this.connect();
-    for (const sub of this.subs.values()) this.sendSubscribe(sub);
+  /**
+   * Open exactly one WebSocket and settle the returned promise once: resolve on
+   * the server's `welcome`, reject if the socket errors or closes before it
+   * arrives. Also wires the persistent handlers, including the unexpected-close
+   * hook that drives the background reconnect loop.
+   *
+   * The returned promise's rejection is *owned by the caller*: the initial
+   * {@link connect} surfaces it (fast first failure), while {@link reconnectLoop}
+   * catches and retries it. The close handler itself never lets a failure escape
+   * as an unhandled rejection — that was the crash bug this fixes.
+   */
+  private openSocket(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const settleResolve = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      const settleReject = (e: unknown) => {
+        if (!settled) {
+          settled = true;
+          reject(e);
+        }
+      };
+      void getWebSocket()
+        .then((WS) => {
+          const ws = new WS(this.url);
+          this.ws = ws;
+          ws.onopen = () => {};
+          ws.onmessage = (ev: MessageEvent) => {
+            let f: Json;
+            try {
+              f = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data));
+            } catch {
+              return;
+            }
+            this.handle(f, settleResolve);
+          };
+          ws.onerror = () => {
+            // A pre-`welcome` error means this attempt failed. Once we are open,
+            // errors surface via `onclose`, which drives the reconnect instead.
+            if (!this.open) settleReject(new Error(`falcon connect failed: ${this.url}`));
+          };
+          ws.onclose = () => {
+            this.open = false;
+            // The credit window is per-connection; a reconnect's welcome re-grants
+            // a fresh one. Reset it and fail any queued creates so callers can retry
+            // on the new connection rather than hang against a dead window.
+            this.credits = 0;
+            const waiters = this.creditWaiters;
+            this.creditWaiters = [];
+            for (const w of waiters) w.fail(new Error("falcon closed"));
+            if (this.heartbeat) clearInterval(this.heartbeat);
+            // Reject in-flight commands; subscriptions resubscribe on reconnect.
+            for (const p of this.pending.values()) p.reject(new Error("falcon closed"));
+            this.pending.clear();
+            // If this socket never reached `welcome`, settle the attempt as failed
+            // so its awaiter (initial connect or the reconnect loop) moves on.
+            settleReject(new Error(`falcon closed before ready: ${this.url}`));
+            // Recover from an unexpected drop by reconnecting in the background.
+            if (!this.closed) this.beginReconnect();
+          };
+        })
+        .catch((e) => settleReject(e));
+    });
+  }
+
+  /**
+   * Start the background reconnect loop after an unexpected close — unless one is
+   * already running or the client was explicitly closed. Publishes a shared
+   * `connectPromise` so any {@link connect} awaiter during the outage latches onto
+   * the in-flight reconnect instead of racing a second socket.
+   */
+  private beginReconnect(): void {
+    if (this.reconnecting || this.closed) return;
+    this.reconnecting = true;
+    let settleShared!: () => void;
+    this.connectPromise = new Promise<void>((res) => {
+      settleShared = res;
+    });
+    void this.reconnectLoop(settleShared);
+  }
+
+  /**
+   * Reconnect with bounded exponential backoff + jitter until the engine returns
+   * (or {@link close} is called). Each attempt's failure is caught here, so a
+   * transient failure while the engine is down never escapes as an unhandled
+   * rejection. On success the server's `welcome` re-subscribes every active
+   * worker (see {@link handle}).
+   */
+  private async reconnectLoop(settleShared: () => void): Promise<void> {
+    let attempt = 0;
+    while (!this.closed && !this.open) {
+      await sleep(this.backoffDelayMs(attempt));
+      attempt += 1;
+      if (this.closed || this.open) break;
+      try {
+        await this.openSocket();
+      } catch {
+        // Transient (engine still down): back off and retry. Swallowed on purpose.
+        continue;
+      }
+    }
+    this.reconnecting = false;
+    if (!this.open) this.connectPromise = null;
+    settleShared();
+  }
+
+  /**
+   * Bounded exponential backoff with full jitter, capped so a long outage keeps
+   * retrying at a steady ceiling rather than backing off forever.
+   */
+  private backoffDelayMs(attempt: number): number {
+    const base = 100;
+    const cap = 2000;
+    const ceiling = Math.min(cap, base * 2 ** attempt);
+    return Math.floor(base / 2 + Math.random() * (ceiling - base / 2));
   }
 
   private handle(f: Json, resolveConnect: () => void): void {
