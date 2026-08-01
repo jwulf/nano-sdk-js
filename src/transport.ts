@@ -140,7 +140,13 @@ export class FalconTransport {
   private openSocket(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      // Whether this socket reached `welcome`. Only an *established* connection
+      // dropping should start the background reconnect loop — a failed initial
+      // dial rejects once (see {@link connect}) and must not spin up a hidden
+      // loop the caller never asked for.
+      let reachedWelcome = false;
       const settleResolve = () => {
+        reachedWelcome = true;
         if (!settled) {
           settled = true;
           resolve();
@@ -187,8 +193,11 @@ export class FalconTransport {
             // If this socket never reached `welcome`, settle the attempt as failed
             // so its awaiter (initial connect or the reconnect loop) moves on.
             settleReject(new Error(`falcon closed before ready: ${this.url}`));
-            // Recover from an unexpected drop by reconnecting in the background.
-            if (!this.closed) this.beginReconnect();
+            // Only recover from the drop of an *established* connection. A failed
+            // initial dial already rejected once and must not start a background
+            // loop; the reconnect loop drives its own retries via its while-loop,
+            // so its failed attempts don't need to re-trigger here either.
+            if (!this.closed && reachedWelcome) this.beginReconnect();
           };
         })
         .catch((e) => settleReject(e));
@@ -237,14 +246,17 @@ export class FalconTransport {
   }
 
   /**
-   * Bounded exponential backoff with full jitter, capped so a long outage keeps
-   * retrying at a steady ceiling rather than backing off forever.
+   * Full-jitter (AWS-style) exponential backoff: a uniform random delay in
+   * `[0, ceiling)`, where the ceiling grows exponentially from `base` (100ms)
+   * and is clamped to `cap` (2s). Full jitter spreads retries out to avoid a
+   * thundering herd while still keeping a long outage retrying at a steady
+   * ceiling rather than backing off forever.
    */
   private backoffDelayMs(attempt: number): number {
     const base = 100;
     const cap = 2000;
     const ceiling = Math.min(cap, base * 2 ** attempt);
-    return Math.floor(base / 2 + Math.random() * (ceiling - base / 2));
+    return Math.floor(Math.random() * ceiling);
   }
 
   private handle(f: Json, resolveConnect: () => void): void {

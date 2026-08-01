@@ -196,4 +196,20 @@ describe("FalconTransport crash-resilient reconnect (issue #3)", () => {
     await sleep(50);
     expect(unhandled).toEqual([]);
   });
+
+  it("does NOT start a background reconnect loop after a failed initial connect", async () => {
+    const port = await reservePort();
+    trackUnhandled();
+
+    // A failed initial dial must reject once and stop — not spin a hidden loop.
+    t = new FalconTransport(`http://127.0.0.1:${port}`, "/falcon");
+    await expect(t.connect()).rejects.toThrow();
+
+    // Now bring an engine up on that port. Because no background loop is running,
+    // the client must NOT connect to it on its own (the caller never re-dialed).
+    gw = await startMockGateway({ port });
+    await sleep(600); // span several would-be backoff cycles
+    expect(gw.connections()).toBe(0);
+    expect(unhandled).toEqual([]);
+  });
 });
