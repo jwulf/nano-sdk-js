@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/jwulf/nano-sdk-js/compare/v1.2.0...v1.2.1) (2026-08-01)
+
+
+### Bug Fixes
+
+* **transport:** crash-resilient Falcon reconnect (backoff; no unhandled rejection) ([#4](https://github.com/jwulf/nano-sdk-js/issues/4)) ([d96e722](https://github.com/jwulf/nano-sdk-js/commit/d96e722d5674fcdc943a9cfcfc776f9e6f4a8297)), closes [#3](https://github.com/jwulf/nano-sdk-js/issues/3) [#3](https://github.com/jwulf/nano-sdk-js/issues/3)
+
 # [1.2.0](https://github.com/jwulf/nano-sdk-js/compare/v1.1.0...v1.2.0) (2026-07-04)
 
 
