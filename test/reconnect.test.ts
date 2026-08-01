@@ -184,6 +184,27 @@ describe("FalconTransport crash-resilient reconnect (issue #3)", () => {
     expect(unhandled).toEqual([]);
   });
 
+  it("rejects (does not hang) a create issued after close() during an outage", async () => {
+    const port = await reservePort();
+    trackUnhandled();
+
+    gw = await startMockGateway({ port, ackCreates: true });
+    t = new FalconTransport(gw.restAddress, "/falcon");
+    await t.connect(); // established
+
+    // Crash so the background reconnect loop is running, then shut down mid-outage.
+    await gw.crash();
+    gw = undefined;
+    await sleep(50);
+    t.close();
+
+    // A create must not silently hang waiting for a submission credit on a dead,
+    // closed transport — connect() must observe !open and reject.
+    await expect(t.createInstance({ processDefinitionId: "p" })).rejects.toThrow();
+    await sleep(20);
+    expect(unhandled).toEqual([]);
+  });
+
   it("surfaces a fast initial-connect failure (reject-once) when the engine is absent", async () => {
     const port = await reservePort();
     trackUnhandled();

@@ -110,8 +110,17 @@ export class FalconTransport {
   }
 
   async connect(): Promise<void> {
+    if (this.closed) throw new Error(`falcon closed: ${this.url}`);
     if (this.open) return;
-    if (this.connectPromise) return this.connectPromise;
+    if (this.connectPromise) {
+      // A connect/reconnect is already in flight. Wait for it, then verify we are
+      // actually open: the shared reconnect promise also resolves when the loop
+      // exits because close() was called, so callers must not proceed (e.g. into
+      // acquireCredit) against a transport that never came back up.
+      await this.connectPromise;
+      if (!this.open) throw new Error(`falcon not connected (closed or unavailable): ${this.url}`);
+      return;
+    }
     // Initial connect fails fast (reject-once) so the caller sees a prompt error,
     // but we clear the shared promise on failure so a later call can retry cleanly.
     // Only *background* reconnects (after an unexpected drop) loop; see
