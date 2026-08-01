@@ -173,6 +173,10 @@ export class FalconTransport {
           this.ws = ws;
           ws.onopen = () => {};
           ws.onmessage = (ev: MessageEvent) => {
+            // Ignore frames from a socket that has already been superseded by a
+            // newer attempt — a stale message must not mutate current-connection
+            // state (e.g. a late `welcome` flipping `open`).
+            if (this.ws !== ws) return;
             let f: Json;
             try {
               f = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data));
@@ -182,11 +186,20 @@ export class FalconTransport {
             this.handle(f, settleResolve);
           };
           ws.onerror = () => {
+            if (this.ws !== ws) return;
             // A pre-`welcome` error means this attempt failed. Once we are open,
             // errors surface via `onclose`, which drives the reconnect instead.
             if (!this.open) settleReject(new Error(`falcon connect failed: ${this.url}`));
           };
           ws.onclose = () => {
+            // A superseded socket (replaced by a newer attempt) may close late —
+            // after the error→close gap. It must NOT reset `open`, clear credits,
+            // or reject the pending work of the *current* connection. Settle only
+            // its own (already-settled) attempt promise and bail.
+            if (this.ws !== ws) {
+              settleReject(new Error(`falcon closed before ready: ${this.url}`));
+              return;
+            }
             this.open = false;
             // The credit window is per-connection; a reconnect's welcome re-grants
             // a fresh one. Reset it and fail any queued creates so callers can retry
