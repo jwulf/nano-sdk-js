@@ -32,7 +32,7 @@
     "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
-    "@camunda8/orchestration-cluster-api": "10.0.0-alpha.13",
+    "@camunda8/orchestration-cluster-api": "10.0.0-alpha.20",
     "ws": "^8.18.0"
   },
   "devDependencies": {
