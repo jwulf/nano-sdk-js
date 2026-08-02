@@ -1,3 +1,10 @@
+## [1.2.3](https://github.com/jwulf/nano-sdk-js/compare/v1.2.2...v1.2.3) (2026-08-02)
+
+
+### Bug Fixes
+
+* **deps:** release @camunda8/orchestration-cluster-api 10.0.0-alpha.22 bump ([#7](https://github.com/jwulf/nano-sdk-js/issues/7)) ([11a25cf](https://github.com/jwulf/nano-sdk-js/commit/11a25cf73a6456e114a7c85e8941716be1ca95b6))
+
 ## [1.2.2](https://github.com/jwulf/nano-sdk-js/compare/v1.2.1...v1.2.2) (2026-08-02)
 
 
