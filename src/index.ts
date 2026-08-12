@@ -12,6 +12,7 @@ import { detectNano, normalizeBase, type NanoInfo } from "./detect.js";
 import { FalconTransport } from "./transport.js";
 import { EmbeddedTransport, type EmbeddedHost } from "./embedded.js";
 import { NanoJobWorker } from "./nanoWorker.js";
+import { withRestPollDefault, wrapRestPollDefault } from "./restPollDefault.js";
 
 // Re-export everything else so consumers can swap the import path and nothing
 // breaks.
@@ -121,7 +122,7 @@ function baseFrom(restAddress: string): string {
 export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCamundaClientBase> {
   const client = createCamundaClientBase(opts as any);
   const mode = resolveMode(opts);
-  if (mode === "rest") return client;
+  if (mode === "rest") return wrapRestPollDefault(client);
 
   // Embedded (ADR 0005): bind the in-process μ-nano host directly — no detection,
   // no socket. The host is the loopback "Nano gateway in the same process".
@@ -225,7 +226,7 @@ function wrapClient(
         return (cfg: any) => {
           const w = new NanoJobWorker(null as any, { ...cfg, autoStart: false });
           void ensure().then(async (t) => {
-            if (!t) { (target as any).createJobWorker(cfg); return; }
+            if (!t) { (target as any).createJobWorker(withRestPollDefault(cfg)); return; }
             w.bindTransport(t as any);
             try { await w.start(); }
             catch (e) {
@@ -234,7 +235,7 @@ function wrapClient(
                 `[@nanobpm/sdk] Falcon subscribe failed (${(e as Error)?.message ?? e}); ` +
                   `falling back to REST job worker.`,
               );
-              (target as any).createJobWorker(cfg);
+              (target as any).createJobWorker(withRestPollDefault(cfg));
             }
           });
           return w as any;
