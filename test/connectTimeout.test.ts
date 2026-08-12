@@ -16,6 +16,11 @@ import { ConnectTimeoutError, FalconTransport } from "../src/transport.js";
 interface MockOpts {
   /** When true, the gateway accepts the socket but never sends `welcome`. */
   blackhole: boolean;
+  /**
+   * When set, the gateway sends `welcome` after this many ms — used to simulate a
+   * `welcome` that arrives *after* the client's handshake deadline has fired.
+   */
+  welcomeDelayMs?: number;
 }
 
 /** A mock Falcon gateway that either stalls the handshake or completes it. */
@@ -32,11 +37,18 @@ function startMockGateway(opts: MockOpts): Promise<{
     wss.on("connection", (ws) => {
       connections += 1;
       sockets.push(ws);
-      if (!opts.blackhole) {
+      const welcome = () =>
         ws.send(JSON.stringify({ type: "welcome", submissionCredits: 8, heartbeatMs: 0 }));
+      if (!opts.blackhole) {
+        welcome();
+      } else if (opts.welcomeDelayMs !== undefined) {
+        // Deliver `welcome` late, after the client's deadline should have fired.
+        setTimeout(() => {
+          if (ws.readyState === ws.OPEN) welcome();
+        }, opts.welcomeDelayMs);
       }
-      // blackhole: intentionally send nothing — the handshake is complete but
-      // `welcome` never arrives.
+      // blackhole (no delay): intentionally send nothing — the handshake is
+      // complete but `welcome` never arrives.
     });
     http.listen(0, "127.0.0.1", () => {
       const { port } = http.address() as AddressInfo;
@@ -89,6 +101,21 @@ describe("FalconTransport handshake deadline", () => {
     expect(Date.now() - started).toBeLessThan(2000);
     // A fresh dial was made for the second attempt (no stuck shared promise).
     expect(gw.connections()).toBeGreaterThanOrEqual(2);
+  });
+
+  it("ignores a late welcome that arrives after the deadline fired", async () => {
+    // Race guard: once the handshake deadline rejects connect() with
+    // ConnectTimeoutError and closes the socket, a `welcome` frame that slips in
+    // before the close completes must NOT flip the transport to open (setting
+    // `this.open`, arming the heartbeat, re-subscribing) behind the caller's back.
+    gw = await startMockGateway({ blackhole: true, welcomeDelayMs: 120 });
+    t = new FalconTransport(gw.restAddress, "/falcon", undefined, 60);
+
+    await expect(t.connect()).rejects.toBeInstanceOf(ConnectTimeoutError);
+    // Wait past the gateway's delayed welcome so it would have landed if the
+    // socket were still selected.
+    await new Promise((r) => setTimeout(r, 150));
+    expect((t as unknown as { open: boolean }).open).toBe(false);
   });
 
   it("does not trip when welcome arrives before the deadline", async () => {

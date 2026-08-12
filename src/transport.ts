@@ -230,6 +230,12 @@ export class FalconTransport {
             connectTimer = setTimeout(() => {
               if (this.ws !== ws || settled) return;
               settleReject(new ConnectTimeoutError(this.connectTimeoutMs!));
+              // De-select this socket before closing so any late frame (e.g. a
+              // `welcome` that arrives between reject and the socket actually
+              // closing) is ignored by `onmessage`/`onclose` (`this.ws !== ws`)
+              // and cannot flip `this.open`/arm the heartbeat after connect has
+              // already failed with ConnectTimeoutError.
+              this.ws = null;
               try {
                 ws.close(4408, "handshake timeout");
               } catch {
