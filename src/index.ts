@@ -53,6 +53,43 @@ function forceRest(opts?: AnyOpts): boolean {
   return isTruthyEnv(fromOpts) || isTruthyEnv(fromEnv);
 }
 
+/**
+ * Default broker long-poll window (ms) applied to a REST job worker when the
+ * caller doesn't set one. Without it the upstream SDK sends `requestTimeout: 0`,
+ * so the Nano gateway falls back to its own short default window (~5s) and an
+ * idle worker reconnects every few seconds. A 30s window keeps an idle REST
+ * worker on one held connection ~6x longer, cutting reconnect churn (and the
+ * chances of a transient connect failure) while the broker still returns
+ * immediately the moment a job arrives. Falcon workers are push-based and are
+ * unaffected. An explicit `pollTimeoutMs` (including `0`/negative) always wins.
+ */
+const REST_DEFAULT_POLL_TIMEOUT_MS = 30_000;
+
+/** Inject the default REST long-poll window unless the caller set one.
+ *  Exported for testing. */
+export function withRestPollDefault(cfg: any): any {
+  if (cfg && cfg.pollTimeoutMs === undefined) {
+    return { ...cfg, pollTimeoutMs: REST_DEFAULT_POLL_TIMEOUT_MS };
+  }
+  return cfg;
+}
+
+/** Wrap a base client so REST `createJobWorker` gets the default long-poll
+ *  window, leaving every other method untouched. Used on the pure-REST path.
+ *  Exported for testing. */
+export function wrapRestPollDefault(
+  client: ReturnType<typeof createCamundaClientBase>,
+): ReturnType<typeof createCamundaClientBase> {
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === "createJobWorker") {
+        return (cfg: any) => (target as any).createJobWorker(withRestPollDefault(cfg));
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
 function resolveMode(opts?: AnyOpts): NanoTransport {
   // Explicit escape hatch for environments where WebSockets are blocked
   // (e.g. corporate proxies). Wins over CAMUNDA_TRANSPORT.
@@ -90,7 +127,7 @@ function baseFrom(restAddress: string): string {
 export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCamundaClientBase> {
   const client = createCamundaClientBase(opts as any);
   const mode = resolveMode(opts);
-  if (mode === "rest") return client;
+  if (mode === "rest") return wrapRestPollDefault(client);
 
   // Embedded (ADR 0005): bind the in-process μ-nano host directly — no detection,
   // no socket. The host is the loopback "Nano gateway in the same process".
@@ -193,7 +230,7 @@ function wrapClient(
         return (cfg: any) => {
           const w = new NanoJobWorker(null as any, { ...cfg, autoStart: false });
           void ensure().then(async (t) => {
-            if (!t) { (target as any).createJobWorker(cfg); return; }
+            if (!t) { (target as any).createJobWorker(withRestPollDefault(cfg)); return; }
             w.bindTransport(t as any);
             try { await w.start(); }
             catch (e) {
@@ -202,7 +239,7 @@ function wrapClient(
                 `[@nanobpm/sdk] Falcon subscribe failed (${(e as Error)?.message ?? e}); ` +
                   `falling back to REST job worker.`,
               );
-              (target as any).createJobWorker(cfg);
+              (target as any).createJobWorker(withRestPollDefault(cfg));
             }
           });
           return w as any;
