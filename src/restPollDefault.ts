@@ -5,7 +5,7 @@
 // (which import this module). Keeping them here keeps the public API surface
 // focused on the SDK it re-exports and avoids leaking helper types into the
 // published `.d.ts`.
-import { createCamundaClient as createCamundaClientBase } from "@camunda8/orchestration-cluster-api";
+import type { createCamundaClient as createCamundaClientBase } from "@camunda8/orchestration-cluster-api";
 
 /** The `createJobWorker` config accepted by the upstream client, derived from
  *  the SDK entrypoint so we keep its full job-worker config type (including
@@ -47,8 +47,13 @@ export function wrapRestPollDefault(
   return new Proxy(client, {
     get(target, prop, receiver) {
       if (prop === "createJobWorker") {
-        return (cfg: RestJobWorkerConfig) =>
-          (target as any).createJobWorker(withRestPollDefault(cfg));
+        let wrapper = boundCache.get(prop);
+        if (wrapper === undefined) {
+          wrapper = (cfg: RestJobWorkerConfig) =>
+            (target as any).createJobWorker(withRestPollDefault(cfg));
+          boundCache.set(prop, wrapper);
+        }
+        return wrapper;
       }
       // Preserve original call semantics: bind forwarded methods to the
       // underlying client so `this` is the real client (not this Proxy),
