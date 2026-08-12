@@ -40,6 +40,10 @@ export function withRestPollDefault(cfg: RestJobWorkerConfig): RestJobWorkerConf
 export function wrapRestPollDefault(
   client: ReturnType<typeof createCamundaClientBase>,
 ): ReturnType<typeof createCamundaClientBase> {
+  // Cache bound methods per property key so repeated reads return the same
+  // function reference (stable identity), rather than allocating a fresh bound
+  // function on every access.
+  const boundCache = new Map<PropertyKey, unknown>();
   return new Proxy(client, {
     get(target, prop, receiver) {
       if (prop === "createJobWorker") {
@@ -50,7 +54,15 @@ export function wrapRestPollDefault(
       // underlying client so `this` is the real client (not this Proxy),
       // which matters for methods that touch private fields.
       const value = Reflect.get(target, prop, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
+      if (typeof value !== "function") {
+        return value;
+      }
+      let bound = boundCache.get(prop);
+      if (bound === undefined) {
+        bound = value.bind(target);
+        boundCache.set(prop, bound);
+      }
+      return bound;
     },
   });
 }
