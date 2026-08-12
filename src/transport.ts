@@ -70,6 +70,29 @@ export class SubmissionTimeoutError extends Error {
   }
 }
 
+/**
+ * Thrown by {@link FalconTransport.connect} when a WebSocket is opened but the
+ * gateway does not complete the Falcon handshake (no `welcome` frame) within
+ * `connectTimeoutMs`.
+ *
+ * Most WebSocket-hostile infrastructure (corporate proxies, HTTP-only ingress,
+ * some L7 load balancers / WAFs) *rejects* the upgrade, which surfaces promptly
+ * as a socket error and falls back to REST. But a proxy that *blackholes* the
+ * upgrade — accepting the TCP connection and forwarding bytes while the
+ * handshake never completes and no `welcome` ever arrives — would otherwise
+ * leave {@link FalconTransport.connect} pending forever, hanging the first
+ * request instead of degrading to REST. A bounded connect deadline turns that
+ * silent stall into this typed rejection so the caller can fall back to REST.
+ */
+export class ConnectTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(
+      `falcon handshake stalled: no gateway welcome within ${timeoutMs}ms (WebSocket upgrade may be blocked or blackholed by intervening infra)`,
+    );
+    this.name = "ConnectTimeoutError";
+  }
+}
+
 export class FalconTransport {
   private url: string;
   private ws: WebSocket | null = null;
@@ -85,6 +108,14 @@ export class FalconTransport {
   private reconnecting = false;
   private defaultSubmitTimeoutMs?: number;
   /**
+   * Client-side bound (ms) on the Falcon handshake: how long a freshly-opened
+   * WebSocket may take to deliver its `welcome` before {@link connect} rejects
+   * with {@link ConnectTimeoutError}. Guards against WebSocket-hostile infra
+   * that blackholes the upgrade (accepts the socket but never completes the
+   * handshake). `undefined`/`0` waits indefinitely (legacy behaviour).
+   */
+  private connectTimeoutMs?: number;
+  /**
    * Server-granted submission-credit window (seeded by `welcome`, topped up by
    * `submissionCredits`). Mirrors the engine's intake metering so creates queue
    * client-side under admission backpressure instead of flooding the gateway.
@@ -92,12 +123,19 @@ export class FalconTransport {
   private credits = 0;
   private creditWaiters: CreditWaiter[] = [];
 
-  constructor(restAddress: string, path: string, defaultSubmitTimeoutMs?: number) {
+  constructor(
+    restAddress: string,
+    path: string,
+    defaultSubmitTimeoutMs?: number,
+    connectTimeoutMs?: number,
+  ) {
     this.url = falconUrl(restAddress, path);
     this.defaultSubmitTimeoutMs =
       defaultSubmitTimeoutMs !== undefined && defaultSubmitTimeoutMs > 0
         ? defaultSubmitTimeoutMs
         : undefined;
+    this.connectTimeoutMs =
+      connectTimeoutMs !== undefined && connectTimeoutMs > 0 ? connectTimeoutMs : undefined;
   }
 
   private nextCorr(): number {
@@ -154,14 +192,27 @@ export class FalconTransport {
       // dial rejects once (see {@link connect}) and must not spin up a hidden
       // loop the caller never asked for.
       let reachedWelcome = false;
+      // Bound the handshake: if `welcome` never arrives (a blackholing proxy
+      // that upgrades the socket but stalls), reject with ConnectTimeoutError so
+      // the caller can fall back to REST instead of hanging forever. Cleared on
+      // the first settle (either outcome).
+      let connectTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearConnectTimer = () => {
+        if (connectTimer !== undefined) {
+          clearTimeout(connectTimer);
+          connectTimer = undefined;
+        }
+      };
       const settleResolve = () => {
         reachedWelcome = true;
+        clearConnectTimer();
         if (!settled) {
           settled = true;
           resolve();
         }
       };
       const settleReject = (e: unknown) => {
+        clearConnectTimer();
         if (!settled) {
           settled = true;
           reject(e);
@@ -171,6 +222,28 @@ export class FalconTransport {
         .then((WS) => {
           const ws = new WS(this.url);
           this.ws = ws;
+          // Arm the handshake deadline now that a socket exists. On expiry,
+          // reject this attempt and close the socket; `reachedWelcome` stays
+          // false, so the onclose handler will NOT start a background reconnect
+          // (a stalled handshake is treated like a failed initial dial).
+          if (this.connectTimeoutMs !== undefined) {
+            connectTimer = setTimeout(() => {
+              if (this.ws !== ws || settled) return;
+              settleReject(new ConnectTimeoutError(this.connectTimeoutMs!));
+              // De-select this socket before closing so any late frame (e.g. a
+              // `welcome` that arrives between reject and the socket actually
+              // closing) is ignored by `onmessage`/`onclose` (`this.ws !== ws`)
+              // and cannot flip `this.open`/arm the heartbeat after connect has
+              // already failed with ConnectTimeoutError.
+              this.ws = null;
+              try {
+                ws.close(4408, "handshake timeout");
+              } catch {
+                /* ignore */
+              }
+            }, this.connectTimeoutMs);
+            (connectTimer as { unref?: () => void }).unref?.();
+          }
           ws.onopen = () => {};
           ws.onmessage = (ev: MessageEvent) => {
             // Ignore frames from a socket that has already been superseded by a

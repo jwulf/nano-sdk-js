@@ -17,7 +17,7 @@ import { NanoJobWorker } from "./nanoWorker.js";
 // breaks.
 export * from "@camunda8/orchestration-cluster-api";
 export { detectNano, type NanoInfo } from "./detect.js";
-export { FalconTransport, SubmissionTimeoutError } from "./transport.js";
+export { FalconTransport, SubmissionTimeoutError, ConnectTimeoutError } from "./transport.js";
 export { EmbeddedTransport, type EmbeddedHost, type EmbeddedJob } from "./embedded.js";
 export { NanoJobWorker } from "./nanoWorker.js";
 
@@ -29,6 +29,14 @@ type AnyOpts = Parameters<typeof createCamundaClientBase>[0] & {
     CAMUNDA_TRANSPORT?: NanoTransport;
     CAMUNDA_REST_ADDRESS?: string;
     CAMUNDA_NANO_SUBMIT_TIMEOUT_MS?: string | number;
+    /**
+     * Client-side bound (ms) on the Falcon WebSocket handshake. If the gateway
+     * advertises Falcon but the socket opens without ever completing the
+     * handshake (a proxy that blackholes the upgrade), the SDK gives up after
+     * this deadline and falls back to REST instead of hanging. Defaults to
+     * {@link DEFAULT_CONNECT_TIMEOUT_MS}; set `0` to wait indefinitely.
+     */
+    CAMUNDA_NANO_CONNECT_TIMEOUT_MS?: string | number;
     /**
      * Force plain REST even when the gateway advertises Falcon. Useful for
      * environments where WebSockets are blocked (corporate proxies etc.).
@@ -76,6 +84,29 @@ function resolveSubmitTimeoutMs(opts?: AnyOpts): number | undefined {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/**
+ * Default Falcon handshake deadline (ms). Unlike the submit timeout (which
+ * defaults to indefinite backpressure waiting), the connect timeout defaults to
+ * a finite value: a stalled handshake must degrade to REST out of the box, not
+ * hang. Generous enough not to trip a slow-but-legitimate handshake.
+ */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 5000;
+
+/**
+ * Falcon handshake deadline (ms), from `opts.config.CAMUNDA_NANO_CONNECT_TIMEOUT_MS`
+ * or the env var, defaulting to {@link DEFAULT_CONNECT_TIMEOUT_MS}. An explicit
+ * `0` (or negative/NaN) disables the deadline — wait indefinitely for `welcome`.
+ */
+function resolveConnectTimeoutMs(opts?: AnyOpts): number | undefined {
+  const raw =
+    (opts?.config?.CAMUNDA_NANO_CONNECT_TIMEOUT_MS as string | number | undefined) ??
+    (typeof process !== "undefined" ? process.env?.CAMUNDA_NANO_CONNECT_TIMEOUT_MS : undefined);
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_CONNECT_TIMEOUT_MS;
+  const n = typeof raw === "string" ? Number(raw) : raw;
+  if (!Number.isFinite(n) || n <= 0) return undefined; // explicit opt-out
+  return n;
+}
+
 /** restAddress is normalized by the SDK to end with /v2; strip it for base. */
 function baseFrom(restAddress: string): string {
   return normalizeBase(restAddress).replace(/\/v2$/, "");
@@ -103,6 +134,7 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
   const restAddress = client.getConfig().restAddress;
   const base = baseFrom(restAddress);
   const submitTimeoutMs = resolveSubmitTimeoutMs(opts);
+  const connectTimeoutMs = resolveConnectTimeoutMs(opts);
 
   let transport: FalconTransport | null = null;
   let nano: NanoInfo | null | undefined; // undefined = not yet probed
@@ -133,7 +165,7 @@ export function createCamundaClient(opts?: AnyOpts): ReturnType<typeof createCam
     }
     if (!nano) return null;
     if (!transport) {
-      const t = new FalconTransport(base, nano.falconPath, submitTimeoutMs);
+      const t = new FalconTransport(base, nano.falconPath, submitTimeoutMs, connectTimeoutMs);
       try {
         // Eagerly open the socket so a proxy-blocked WebSocket surfaces here
         // (single failure) rather than on every request.
