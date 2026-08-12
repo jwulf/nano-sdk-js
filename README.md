@@ -65,6 +65,34 @@ rejecting with `SubmissionTimeoutError`. It is never sent on the wire. On timeou
 the queued create is dropped so no credit slot leaks. Omit it (the default) to
 wait indefinitely.
 
+## WebSocket-blocked infrastructure
+
+The Falcon upgrade needs a WebSocket. Some infrastructure allows REST but not
+WebSockets — corporate forward proxies, HTTP-only ingress, and some L7 load
+balancers / WAFs. The SDK degrades to REST gracefully in every such case:
+
+- **Upgrade rejected** (the common case — the proxy answers the `Upgrade` with a
+  normal HTTP response): the socket errors immediately, the client marks Falcon
+  dead for its lifetime, logs a one-time warning, and routes everything through
+  REST.
+- **Upgrade blackholed** (rarer — a transparent proxy completes the WebSocket
+  handshake but no `welcome` frame ever arrives): a **handshake deadline**
+  (`CAMUNDA_NANO_CONNECT_TIMEOUT_MS`, default `5000` ms) rejects the connect with
+  `ConnectTimeoutError` so the client falls back to REST instead of hanging the
+  first request. Set it to `0` to wait indefinitely (legacy behaviour).
+- **Mid-session drop** (a proxy severs an established socket): the in-flight
+  `createProcessInstance` retries once over REST; job workers fall back to a REST
+  worker.
+
+To skip Falcon detection entirely (no topology probe, no socket), set the escape
+hatch `CAMUNDA_FORCE_REST=1` (or `CAMUNDA_TRANSPORT=rest`):
+
+```ts
+const client = createCamundaClient({
+  config: { CAMUNDA_REST_ADDRESS: "http://localhost:8080", CAMUNDA_FORCE_REST: 1 },
+});
+```
+
 ## Build & verify
 
 ```sh
