@@ -9,7 +9,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 import { ConnectTimeoutError, FalconTransport } from "../src/transport.js";
 
@@ -44,7 +44,7 @@ function startMockGateway(opts: MockOpts): Promise<{
       } else if (opts.welcomeDelayMs !== undefined) {
         // Deliver `welcome` late, after the client's deadline should have fired.
         setTimeout(() => {
-          if (ws.readyState === ws.OPEN) welcome();
+          if (ws.readyState === WebSocket.OPEN) welcome();
         }, opts.welcomeDelayMs);
       }
       // blackhole (no delay): intentionally send nothing — the handshake is
