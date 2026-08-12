@@ -1,3 +1,10 @@
+## [1.2.4](https://github.com/jwulf/nano-sdk-js/compare/v1.2.3...v1.2.4) (2026-08-12)
+
+
+### Bug Fixes
+
+* fall back to REST when the Falcon WebSocket handshake is blackholed ([#8](https://github.com/jwulf/nano-sdk-js/issues/8)) ([3773ef9](https://github.com/jwulf/nano-sdk-js/commit/3773ef980817d9ff5c91855ed672bc2ec75a4033))
+
 ## [1.2.3](https://github.com/jwulf/nano-sdk-js/compare/v1.2.2...v1.2.3) (2026-08-02)
 
 
