@@ -128,14 +128,18 @@ describe("FalconTransport handshake deadline", () => {
 
   it("waits indefinitely when the deadline is disabled (legacy behaviour)", async () => {
     // With no connect timeout, connect() must not self-reject; it settles only
-    // when welcome finally arrives. Prove it by racing a never-resolving connect
-    // against a short timer, then completing the handshake.
-    gw = await startMockGateway({ blackhole: true });
+    // when welcome finally arrives. Prove it by racing the connect against a short
+    // timer to confirm it's still pending well past when any deadline would fire,
+    // then completing the handshake and asserting connect() resolves.
+    gw = await startMockGateway({ blackhole: true, welcomeDelayMs: 300 });
     t = new FalconTransport(gw.restAddress, "/falcon"); // no connectTimeoutMs
+    const connect = t.connect().then(() => "connected").catch((e) => `rejected:${(e as Error).name}`);
     const race = await Promise.race([
-      t.connect().then(() => "connected").catch((e) => `rejected:${(e as Error).name}`),
+      connect,
       new Promise<string>((r) => setTimeout(() => r("pending"), 200)),
     ]);
     expect(race).toBe("pending");
+    // The delayed welcome (300ms) finally lands and settles the handshake.
+    await expect(connect).resolves.toBe("connected");
   });
 });
