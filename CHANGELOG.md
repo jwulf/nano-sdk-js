@@ -1,3 +1,10 @@
+## [1.2.5](https://github.com/jwulf/nano-sdk-js/compare/v1.2.4...v1.2.5) (2026-08-12)
+
+
+### Bug Fixes
+
+* **rest:** default REST job-worker long-poll to 30s ([#9](https://github.com/jwulf/nano-sdk-js/issues/9)) ([02b14b6](https://github.com/jwulf/nano-sdk-js/commit/02b14b6b59c600ae2560fef1988f174b1d8ef112))
+
 ## [1.2.4](https://github.com/jwulf/nano-sdk-js/compare/v1.2.3...v1.2.4) (2026-08-12)
 
 
