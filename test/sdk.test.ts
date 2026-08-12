@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { falconUrl, normalizeBase } from "../src/detect.js";
-import { createCamundaClient, withRestPollDefault, wrapRestPollDefault } from "../src/index.js";
+import { createCamundaClient } from "../src/index.js";
+import { withRestPollDefault, wrapRestPollDefault } from "../src/restPollDefault.js";
 
 describe("detect", () => {
   it("normalizes base and builds ws url", () => {

@@ -12,6 +12,7 @@ import { detectNano, normalizeBase, type NanoInfo } from "./detect.js";
 import { FalconTransport } from "./transport.js";
 import { EmbeddedTransport, type EmbeddedHost } from "./embedded.js";
 import { NanoJobWorker } from "./nanoWorker.js";
+import { withRestPollDefault, wrapRestPollDefault } from "./restPollDefault.js";
 
 // Re-export everything else so consumers can swap the import path and nothing
 // breaks.
@@ -51,56 +52,6 @@ function forceRest(opts?: AnyOpts): boolean {
   const fromEnv =
     typeof process !== "undefined" ? process.env?.CAMUNDA_FORCE_REST : undefined;
   return isTruthyEnv(fromOpts) || isTruthyEnv(fromEnv);
-}
-
-/** The `createJobWorker` config accepted by the upstream client, derived from
- *  the SDK entrypoint so we keep its full job-worker config type (including
- *  `pollTimeoutMs`) without importing extra types. */
-type RestJobWorkerConfig = Parameters<
-  ReturnType<typeof createCamundaClientBase>["createJobWorker"]
->[0];
-
-/**
- * Default broker long-poll window (ms) applied to a REST job worker when the
- * caller doesn't set one. Without it the upstream REST worker activates jobs
- * with `pollTimeoutMs` unset, so the Nano gateway falls back to its own short
- * default window (~5s) and an idle worker reconnects every few seconds. A 30s
- * window keeps an idle REST worker on one held connection ~6x longer, cutting
- * reconnect churn (and the chances of a transient connect failure) while the
- * broker still returns immediately the moment a job arrives. Falcon workers are
- * push-based and are unaffected. An explicit `pollTimeoutMs` (including
- * `0`/negative) always wins.
- */
-const REST_DEFAULT_POLL_TIMEOUT_MS = 30_000;
-
-/** Inject the default REST long-poll window unless the caller set one.
- *  Exported for testing. */
-export function withRestPollDefault(cfg: RestJobWorkerConfig): RestJobWorkerConfig {
-  if (cfg && cfg.pollTimeoutMs === undefined) {
-    return { ...cfg, pollTimeoutMs: REST_DEFAULT_POLL_TIMEOUT_MS };
-  }
-  return cfg;
-}
-
-/** Wrap a base client so REST `createJobWorker` gets the default long-poll
- *  window, leaving every other method untouched. Used on the pure-REST path.
- *  Exported for testing. */
-export function wrapRestPollDefault(
-  client: ReturnType<typeof createCamundaClientBase>,
-): ReturnType<typeof createCamundaClientBase> {
-  return new Proxy(client, {
-    get(target, prop, receiver) {
-      if (prop === "createJobWorker") {
-        return (cfg: RestJobWorkerConfig) =>
-          (target as any).createJobWorker(withRestPollDefault(cfg));
-      }
-      // Preserve original call semantics: bind forwarded methods to the
-      // underlying client so `this` is the real client (not this Proxy),
-      // which matters for methods that touch private fields.
-      const value = Reflect.get(target, prop, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
 }
 
 function resolveMode(opts?: AnyOpts): NanoTransport {
