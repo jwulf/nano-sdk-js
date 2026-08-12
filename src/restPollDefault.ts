@@ -45,7 +45,7 @@ export function wrapRestPollDefault(
   // function on every access.
   const boundCache = new Map<PropertyKey, unknown>();
   return new Proxy(client, {
-    get(target, prop, receiver) {
+    get(target, prop) {
       if (prop === "createJobWorker") {
         let wrapper = boundCache.get(prop);
         if (wrapper === undefined) {
@@ -55,10 +55,12 @@ export function wrapRestPollDefault(
         }
         return wrapper;
       }
-      // Preserve original call semantics: bind forwarded methods to the
+      // Preserve original call semantics: read (and later bind) against the
       // underlying client so `this` is the real client (not this Proxy),
-      // which matters for methods that touch private fields.
-      const value = Reflect.get(target, prop, receiver);
+      // which matters for methods — and getter accessors — that touch private
+      // fields. Passing `target` as the receiver ensures accessors run with
+      // `this === target` rather than the Proxy.
+      const value = Reflect.get(target, prop, target);
       if (typeof value !== "function") {
         return value;
       }
