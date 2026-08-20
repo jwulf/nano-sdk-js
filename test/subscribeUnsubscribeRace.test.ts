@@ -32,6 +32,9 @@ class FakeWS {
   hasFrame(type: string): boolean {
     return this.sent.some((s) => JSON.parse(s).type === type);
   }
+  countFrame(type: string): number {
+    return this.sent.filter((s) => JSON.parse(s).type === type).length;
+  }
 }
 
 (globalThis as { WebSocket?: unknown }).WebSocket = FakeWS as unknown;
@@ -87,6 +90,42 @@ describe("FalconTransport subscribe/unsubscribe race (issue #12)", () => {
     await p;
 
     expect(ws.hasFrame("subscribe")).toBe(true);
+
+    t.close();
+  });
+
+  it("sends exactly one subscribe frame when subscribing before connect (no duplicate from welcome)", async () => {
+    // The `welcome` handler re-subscribes every active sub. subscribe() must not
+    // also send its own frame in that window, or the gateway sees a duplicate.
+    const t = new FalconTransport("http://fake/", "/falcon");
+
+    const p = t.subscribe(sub);
+    await tick();
+    const ws = FakeWS.instances[0];
+
+    ws.emit({ type: "welcome", submissionCredits: 3, heartbeatMs: 0 });
+    await p;
+
+    expect(ws.countFrame("subscribe")).toBe(1);
+
+    t.close();
+  });
+
+  it("sends the subscribe frame when subscribing after the transport is already open", async () => {
+    const t = new FalconTransport("http://fake/", "/falcon");
+
+    // Bring the transport up with no active subs.
+    const first = t.connect();
+    await tick();
+    const ws = FakeWS.instances[0];
+    ws.emit({ type: "welcome", submissionCredits: 3, heartbeatMs: 0 });
+    await first;
+    expect(ws.countFrame("subscribe")).toBe(0);
+
+    // Now subscribe against the already-open transport: welcome won't fire again,
+    // so subscribe() itself must send exactly one frame.
+    await t.subscribe(sub);
+    expect(ws.countFrame("subscribe")).toBe(1);
 
     t.close();
   });

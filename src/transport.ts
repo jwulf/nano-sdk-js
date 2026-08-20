@@ -592,6 +592,12 @@ export class FalconTransport {
 
   /** Subscribe a worker; jobs arrive via sub.onJob, credits replenished by ack helpers. */
   async subscribe(sub: Subscription): Promise<void> {
+    // If the transport is not yet open, connect() resolves via the `welcome`
+    // handler, which already sends a subscribe frame for every active sub
+    // (including this one, since we register it below). Sending again here would
+    // duplicate the frame, so only send ourselves when the transport was already
+    // open — where no `welcome` fires for this call.
+    const wasOpen = this.open;
     this.subs.set(sub.jobType, sub);
     await this.connect();
     // If unsubscribe()/stop() ran while we awaited connect(), this sub was
@@ -600,7 +606,7 @@ export class FalconTransport {
     // silently drop (unsubscribe() only clears the local handler), causing
     // avoidable job timeouts. Only send while this sub is still the active one.
     if (this.subs.get(sub.jobType) !== sub) return;
-    this.sendSubscribe(sub);
+    if (wasOpen) this.sendSubscribe(sub);
   }
 
   unsubscribe(jobType: string): void {
