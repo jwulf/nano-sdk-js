@@ -236,7 +236,7 @@ function wrapClient(
       }
       if (prop === "createJobWorker") {
         return (cfg: any) => {
-          const w = new NanoJobWorker(null as any, { ...cfg, autoStart: false });
+          const w = new NanoJobWorker(null, { ...cfg, autoStart: false });
           void ensure().then(async (t) => {
             if (!t) { (target as any).createJobWorker(withRestPollDefault(cfg)); return; }
             w.bindTransport(t as any);
