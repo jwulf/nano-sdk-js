@@ -22,8 +22,13 @@ export class NanoJobWorker {
   private stopped = false;
   /** A start() was requested while transport was still null; replay it on bind. */
   private startRequested = false;
-  /** True once we have issued (or begun issuing) the transport subscription. */
-  private subscribed = false;
+  /**
+   * Shared in-flight (then settled) subscription attempt. Racing start() /
+   * bindTransport() calls await this same promise so they subscribe at most
+   * once, yet all observe a rejection if transport.subscribe() fails. Reset to
+   * null on failure (so a later start() can retry) and on stop().
+   */
+  private subscribePromise: Promise<void> | null = null;
   readonly jobType: string;
   readonly name: string;
 
@@ -42,7 +47,10 @@ export class NanoJobWorker {
    */
   bindTransport(transport: FalconTransport): void {
     this.transport = transport;
-    if (this.startRequested && !this.stopped) void this.subscribe();
+    // Fire-and-forget replay: swallow the rejection on this path so it is not an
+    // unhandled rejection. The shared subscribePromise still rejects, so any
+    // start() awaiting it observes the failure (and resets for a later retry).
+    if (this.startRequested && !this.stopped) void this.subscribe().catch(() => {});
   }
 
   /**
@@ -59,17 +67,28 @@ export class NanoJobWorker {
     await this.subscribe();
   }
 
-  private async subscribe(): Promise<void> {
-    if (this.subscribed || this.stopped || this.transport === null) return;
-    this.subscribed = true; // set before await so a racing call is a no-op
-    await this.transport.subscribe({
-      jobType: this.jobType,
-      worker: this.name,
-      credits: this.credits,
-      timeoutMs: this.cfg.jobTimeoutMs ?? 60_000,
-      fetchVariables: this.cfg.fetchVariables ?? null,
-      onJob: (raw) => void this.dispatch(raw),
-    });
+  private subscribe(): Promise<void> {
+    if (this.stopped || this.transport === null) return Promise.resolve();
+    // Share a single in-flight promise so racing callers coalesce onto one
+    // attempt instead of relying on a synchronous flag set before the await.
+    if (this.subscribePromise !== null) return this.subscribePromise;
+    this.subscribePromise = this.transport
+      .subscribe({
+        jobType: this.jobType,
+        worker: this.name,
+        credits: this.credits,
+        timeoutMs: this.cfg.jobTimeoutMs ?? 60_000,
+        fetchVariables: this.cfg.fetchVariables ?? null,
+        onJob: (raw) => void this.dispatch(raw),
+      })
+      .catch((err) => {
+        // Do not wedge the worker as "subscribed" on failure: clear the shared
+        // promise so a later start() can retry, and rethrow so awaiting callers
+        // (including the proxy's fallback-to-REST catch) observe the error.
+        this.subscribePromise = null;
+        throw err;
+      });
+    return this.subscribePromise;
   }
 
   private enrich(raw: JobFrame) {
@@ -121,7 +140,7 @@ export class NanoJobWorker {
   stop(): void {
     this.stopped = true;
     this.startRequested = false;
-    this.subscribed = false;
+    this.subscribePromise = null;
     this.transport?.unsubscribe(this.jobType);
   }
   close(): void {

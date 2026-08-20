@@ -89,4 +89,35 @@ describe("NanoJobWorker null-transport lifecycle (issue #12)", () => {
     await w.start();
     expect(t.subscribe).toHaveBeenCalledTimes(2);
   });
+
+  it("surfaces a subscribe() failure to the caller and resets so a retry can resubscribe", async () => {
+    const t = fakeTransport();
+    t.subscribe
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce(undefined);
+    const w = new NanoJobWorker(t, cfg);
+
+    // The failure must propagate, not be swallowed into a wedged "subscribed" state.
+    await expect(w.start()).rejects.toThrow("boom");
+
+    // A subsequent start() must be able to retry (shared promise was reset).
+    await expect(w.start()).resolves.toBeUndefined();
+    expect(t.subscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces racing start() calls onto one shared in-flight subscribe attempt", async () => {
+    const t = fakeTransport();
+    let resolveSub: () => void = () => {};
+    t.subscribe.mockImplementationOnce(
+      () => new Promise<void>((res) => (resolveSub = res)),
+    );
+    const w = new NanoJobWorker(t, cfg);
+
+    const a = w.start();
+    const b = w.start();
+    resolveSub();
+    await Promise.all([a, b]);
+
+    expect(t.subscribe).toHaveBeenCalledTimes(1);
+  });
 });
