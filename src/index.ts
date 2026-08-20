@@ -18,7 +18,7 @@ import { withRestPollDefault, wrapRestPollDefault } from "./restPollDefault.js";
 // breaks.
 export * from "@camunda8/orchestration-cluster-api";
 export { detectNano, type NanoInfo } from "./detect.js";
-export { FalconTransport, SubmissionTimeoutError, ConnectTimeoutError } from "./transport.js";
+export { FalconTransport, MalformedFrameError, SubmissionTimeoutError, ConnectTimeoutError } from "./transport.js";
 export { EmbeddedTransport, type EmbeddedHost, type EmbeddedJob } from "./embedded.js";
 export { NanoJobWorker } from "./nanoWorker.js";
 
@@ -206,8 +206,20 @@ function wrapClient(
                 submitTimeoutMs: input?.submitTimeoutMs,
               });
               if (r.status >= 400) throw new Error(`createInstance failed: ${r.status} ${JSON.stringify(r.body)}`);
-              const body: any = r.body ?? {};
-              return r.completion ? { ...body, variables: r.completion.variables, processInstanceKey: r.completion.processInstanceKey } : body;
+              if (r.completion) {
+                // The completion frame carries the authoritative key/variables;
+                // spread whatever the ack body had underneath it.
+                const base = r.body && typeof r.body === "object" ? r.body : {};
+                return { ...base, variables: r.completion.variables, processInstanceKey: r.completion.processInstanceKey };
+              }
+              // No mask: a success status with a missing/non-object body is a
+              // fault (the create returned no result to read a key from), so fail
+              // loud here instead of returning `{}` and deferring to a cryptic
+              // "missing processInstanceKey/key" downstream.
+              if (!r.body || typeof r.body !== "object") {
+                throw new Error(`createInstance: gateway returned success (${r.status}) with no result body`);
+              }
+              return r.body;
             } catch (e) {
               // A late WS failure (proxy severed the socket, reconnect denied) —
               // fall back to REST for this call.

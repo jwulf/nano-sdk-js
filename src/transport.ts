@@ -21,6 +21,28 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+/** Resolved shape of an `awaitCompletion` create. */
+type Completion = { processCompleted: boolean; variables: unknown; processInstanceKey: string };
+
+/**
+ * Thrown when the gateway sends a result frame that omits a field the protocol
+ * requires (a `commandResult` with no `status`, an `instanceCompleted` with no
+ * `processInstanceKey`). The absence of such an identity/status field always
+ * signals an engine or protocol fault, so we surface it loudly here rather than
+ * laundering it into a benign-looking default ("" / 0) that would pass
+ * downstream checks and corrupt state (e.g. completing a job against key "").
+ */
+export class MalformedFrameError extends Error {
+  constructor(
+    readonly frameType: string,
+    readonly detail: string,
+    readonly frame: unknown,
+  ) {
+    super(`malformed Falcon '${frameType}' frame: ${detail}`);
+    this.name = "MalformedFrameError";
+  }
+}
+
 export interface JobFrame {
   jobKey: string;
   type: string;
@@ -99,7 +121,7 @@ export class FalconTransport {
   private open = false;
   private corr = 0;
   private pending = new Map<number, Pending>();
-  private awaits = new Map<number, (v: { processCompleted: boolean; variables: unknown; processInstanceKey: string }) => void>();
+  private awaits = new Map<number, { resolve: (v: Completion) => void; reject: (e: unknown) => void }>();
   private subs = new Map<string, Subscription>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -141,6 +163,22 @@ export class FalconTransport {
   private nextCorr(): number {
     this.corr += 1;
     return this.corr;
+  }
+
+  /**
+   * Parse the correlation id off an inbound result frame. A missing or invalid
+   * `corr` cannot be routed to its waiting caller, so we drop the frame with a
+   * warning rather than coercing it to 0 (which would silently target — or
+   * mis-target — whatever call happens to hold corr 0).
+   */
+  private frameCorr(frameType: string, f: Json): number | null {
+    const c = f.corr;
+    if (typeof c !== "number" || !Number.isInteger(c) || c <= 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[@nanobpm/sdk] dropping malformed Falcon '${frameType}' frame: missing/invalid 'corr'`);
+      return null;
+    }
+    return c;
   }
 
   private send(frame: Json): void {
@@ -285,6 +323,10 @@ export class FalconTransport {
             // Reject in-flight commands; subscriptions resubscribe on reconnect.
             for (const p of this.pending.values()) p.reject(new Error("falcon closed"));
             this.pending.clear();
+            // Also fail any awaited completions: a dropped socket must surface as
+            // a rejection, not leave the completion promise hanging forever.
+            for (const a of this.awaits.values()) a.reject(new Error("falcon closed"));
+            this.awaits.clear();
             // If this socket never reached `welcome`, settle the attempt as failed
             // so its awaiter (initial connect or the reconnect loop) moves on.
             settleReject(new Error(`falcon closed before ready: ${this.url}`));
@@ -376,25 +418,43 @@ export class FalconTransport {
         break;
       }
       case "commandResult": {
-        const corr = Number(f.corr ?? 0);
+        const corr = this.frameCorr("commandResult", f);
+        if (corr === null) break;
         const p = this.pending.get(corr);
-        if (p) {
-          this.pending.delete(corr);
-          p.resolve({ status: Number(f.status ?? 0), body: f.body ?? null });
+        if (!p) break;
+        this.pending.delete(corr);
+        // `status` is required: a missing status must never be read as 0 (a
+        // success code below 400), which would surface an empty result as a
+        // completed create.
+        if (typeof f.status !== "number" || !Number.isFinite(f.status)) {
+          p.reject(new MalformedFrameError("commandResult", "missing numeric 'status'", f));
+          break;
         }
+        // Pass the body through unchanged (no `?? null` mask): an absent body on
+        // a success status is a fault the caller must see, not paper over.
+        p.resolve({ status: f.status, body: f.body });
         break;
       }
       case "instanceCompleted": {
-        const corr = Number(f.corr ?? 0);
+        const corr = this.frameCorr("instanceCompleted", f);
+        if (corr === null) break;
         const cb = this.awaits.get(corr);
-        if (cb) {
-          this.awaits.delete(corr);
-          cb({
-            processCompleted: Boolean(f.processCompleted),
-            variables: f.variables ?? {},
-            processInstanceKey: String(f.processInstanceKey ?? ""),
-          });
+        if (!cb) break;
+        this.awaits.delete(corr);
+        // `processInstanceKey` is required. Tolerate a numeric key (coerce to the
+        // string the protocol uses) but reject an absent/empty one rather than
+        // masking it as "" — a completion with no key is a protocol violation.
+        const rawKey = f.processInstanceKey;
+        const key = typeof rawKey === "number" ? String(rawKey) : rawKey;
+        if (typeof key !== "string" || key.length === 0) {
+          cb.reject(new MalformedFrameError("instanceCompleted", "missing 'processInstanceKey'", f));
+          break;
         }
+        cb.resolve({
+          processCompleted: Boolean(f.processCompleted),
+          variables: f.variables ?? {},
+          processInstanceKey: key,
+        });
         break;
       }
       case "submissionCredits": {
@@ -484,24 +544,48 @@ export class FalconTransport {
     // not granted capacity for. Job completions stay unmetered.
     await this.acquireCredit(input.submitTimeoutMs ?? this.defaultSubmitTimeoutMs);
     const corr = this.nextCorr();
-    let completionResolve: ((v: { processCompleted: boolean; variables: unknown; processInstanceKey: string }) => void) | null = null;
+    let completionResolve: ((v: Completion) => void) | null = null;
+    let completionReject: ((e: unknown) => void) | null = null;
     const completion = input.awaitCompletion
-      ? new Promise<{ processCompleted: boolean; variables: unknown; processInstanceKey: string }>((r) => (completionResolve = r))
+      ? new Promise<Completion>((resolve, reject) => {
+          completionResolve = resolve;
+          completionReject = reject;
+        })
       : null;
-    if (completionResolve) this.awaits.set(corr, completionResolve);
-    const result = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
-      this.pending.set(corr, { resolve, reject });
-      this.send({
-        type: "createInstance",
-        corr,
-        processDefinitionId: input.processDefinitionId ?? null,
-        processDefinitionKey: input.processDefinitionKey ?? null,
-        variables: input.variables ?? null,
-        awaitCompletion: input.awaitCompletion ?? false,
-        fetchVariables: input.fetchVariables ?? null,
-        requestTimeout: input.requestTimeoutMs ?? null,
+    if (completionResolve && completionReject) {
+      this.awaits.set(corr, { resolve: completionResolve, reject: completionReject });
+      // If the completion waiter is rejected (command failure or socket close)
+      // before we reach the `await completion` below, that rejection must not be
+      // an unhandled rejection — attach a benign handler now. `await completion`
+      // still throws on rejection as normal.
+      completion?.catch(() => {});
+    }
+    let result: { status: number; body: unknown };
+    try {
+      result = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+        this.pending.set(corr, { resolve, reject });
+        this.send({
+          type: "createInstance",
+          corr,
+          processDefinitionId: input.processDefinitionId ?? null,
+          processDefinitionKey: input.processDefinitionKey ?? null,
+          variables: input.variables ?? null,
+          awaitCompletion: input.awaitCompletion ?? false,
+          fetchVariables: input.fetchVariables ?? null,
+          requestTimeout: input.requestTimeoutMs ?? null,
+        });
       });
-    });
+    } catch (err) {
+      // The command failed at or before ack (malformed frame, or socket close).
+      // Tear down the completion waiter so it neither leaks in `this.awaits` nor
+      // is left to reject on a later socket close.
+      const waiter = this.awaits.get(corr);
+      if (waiter) {
+        this.awaits.delete(corr);
+        waiter.reject(err);
+      }
+      throw err;
+    }
     const done = completion ? await completion : undefined;
     return { ...result, completion: done };
   }
