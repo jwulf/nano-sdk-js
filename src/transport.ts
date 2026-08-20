@@ -554,20 +554,38 @@ export class FalconTransport {
       : null;
     if (completionResolve && completionReject) {
       this.awaits.set(corr, { resolve: completionResolve, reject: completionReject });
+      // If the completion waiter is rejected (command failure or socket close)
+      // before we reach the `await completion` below, that rejection must not be
+      // an unhandled rejection — attach a benign handler now. `await completion`
+      // still throws on rejection as normal.
+      completion?.catch(() => {});
     }
-    const result = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
-      this.pending.set(corr, { resolve, reject });
-      this.send({
-        type: "createInstance",
-        corr,
-        processDefinitionId: input.processDefinitionId ?? null,
-        processDefinitionKey: input.processDefinitionKey ?? null,
-        variables: input.variables ?? null,
-        awaitCompletion: input.awaitCompletion ?? false,
-        fetchVariables: input.fetchVariables ?? null,
-        requestTimeout: input.requestTimeoutMs ?? null,
+    let result: { status: number; body: unknown };
+    try {
+      result = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+        this.pending.set(corr, { resolve, reject });
+        this.send({
+          type: "createInstance",
+          corr,
+          processDefinitionId: input.processDefinitionId ?? null,
+          processDefinitionKey: input.processDefinitionKey ?? null,
+          variables: input.variables ?? null,
+          awaitCompletion: input.awaitCompletion ?? false,
+          fetchVariables: input.fetchVariables ?? null,
+          requestTimeout: input.requestTimeoutMs ?? null,
+        });
       });
-    });
+    } catch (err) {
+      // The command failed at or before ack (malformed frame, or socket close).
+      // Tear down the completion waiter so it neither leaks in `this.awaits` nor
+      // is left to reject on a later socket close.
+      const waiter = this.awaits.get(corr);
+      if (waiter) {
+        this.awaits.delete(corr);
+        waiter.reject(err);
+      }
+      throw err;
+    }
     const done = completion ? await completion : undefined;
     return { ...result, completion: done };
   }

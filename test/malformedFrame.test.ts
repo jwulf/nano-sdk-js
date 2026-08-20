@@ -72,4 +72,25 @@ describe("FalconTransport strict frame decode", () => {
     ).rejects.toBeInstanceOf(MalformedFrameError);
     t.close();
   });
+
+  it("cleans up the completion waiter when the commandResult fails on an awaitCompletion create", async () => {
+    // A malformed ack (no status) on an awaitCompletion create must reject and
+    // must not leak the completion waiter or leave it to reject unhandled later.
+    gw = await startMockGateway("missingStatus");
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const t = new FalconTransport(gw.restAddress, "/falcon", 1000);
+      await expect(
+        t.createInstance({ processDefinitionId: "p", awaitCompletion: true }),
+      ).rejects.toBeInstanceOf(MalformedFrameError);
+      t.close();
+      // Let any stray microtask-scheduled unhandled rejection surface.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });

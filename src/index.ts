@@ -18,7 +18,7 @@ import { withRestPollDefault, wrapRestPollDefault } from "./restPollDefault.js";
 // breaks.
 export * from "@camunda8/orchestration-cluster-api";
 export { detectNano, type NanoInfo } from "./detect.js";
-export { FalconTransport, SubmissionTimeoutError, ConnectTimeoutError } from "./transport.js";
+export { FalconTransport, MalformedFrameError, SubmissionTimeoutError, ConnectTimeoutError } from "./transport.js";
 export { EmbeddedTransport, type EmbeddedHost, type EmbeddedJob } from "./embedded.js";
 export { NanoJobWorker } from "./nanoWorker.js";
 
