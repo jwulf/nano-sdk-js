@@ -1,6 +1,6 @@
 {
   "name": "@nanobpm/nano-sdk",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "Drop-in replacement for @camunda8/orchestration-cluster-api that upgrades to the Nano Falcon protocol when connected to a Nano server.",
   "license": "Apache-2.0",
   "type": "module",

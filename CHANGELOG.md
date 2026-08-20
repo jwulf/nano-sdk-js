@@ -1,3 +1,10 @@
+## [1.2.7](https://github.com/jwulf/nano-sdk-js/compare/v1.2.6...v1.2.7) (2026-08-20)
+
+
+### Bug Fixes
+
+* **worker:** make NanoJobWorker.start() null-safe and idempotent (Falcon race) ([#13](https://github.com/jwulf/nano-sdk-js/issues/13)) ([680c680](https://github.com/jwulf/nano-sdk-js/commit/680c6800ec31d0906ab69727fe9708fe9210d162)), closes [#12](https://github.com/jwulf/nano-sdk-js/issues/12)
+
 ## [1.2.6](https://github.com/jwulf/nano-sdk-js/compare/v1.2.5...v1.2.6) (2026-08-20)
 
 
