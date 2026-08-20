@@ -1,3 +1,10 @@
+## [1.2.6](https://github.com/jwulf/nano-sdk-js/compare/v1.2.5...v1.2.6) (2026-08-20)
+
+
+### Bug Fixes
+
+* **falcon:** fail loud on malformed result frames instead of masking defaults ([#11](https://github.com/jwulf/nano-sdk-js/issues/11)) ([5a9728b](https://github.com/jwulf/nano-sdk-js/commit/5a9728ba2beaa0b886f162a5b21126590e04d245)), closes [Magikcraft/nano-bpm#940](https://github.com/Magikcraft/nano-bpm/issues/940)
+
 ## [1.2.5](https://github.com/jwulf/nano-sdk-js/compare/v1.2.4...v1.2.5) (2026-08-12)
 
 
