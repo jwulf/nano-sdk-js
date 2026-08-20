@@ -594,6 +594,12 @@ export class FalconTransport {
   async subscribe(sub: Subscription): Promise<void> {
     this.subs.set(sub.jobType, sub);
     await this.connect();
+    // If unsubscribe()/stop() ran while we awaited connect(), this sub was
+    // removed and the caller no longer wants it. Sending the subscribe now would
+    // make the gateway activate/push jobs the client has no handler for and would
+    // silently drop (unsubscribe() only clears the local handler), causing
+    // avoidable job timeouts. Only send while this sub is still the active one.
+    if (this.subs.get(sub.jobType) !== sub) return;
     this.sendSubscribe(sub);
   }
 
